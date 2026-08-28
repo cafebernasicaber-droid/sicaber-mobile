@@ -6,6 +6,7 @@ import '../../../data/services/data_service.dart';
 import '../../../data/models/models.dart';
 import '../../widgets/product/product_card.dart';
 import '../../widgets/common/animations.dart';
+import '../../widgets/common/auth_gate.dart';
 
 // Cuántas categorías se muestran por "página" del selector de chips.
 const int _kCategoriasPorPagina = 5;
@@ -274,34 +275,156 @@ class _ComboCard extends StatelessWidget {
   final Combo combo;
   const _ComboCard({required this.combo});
 
-  @override Widget build(BuildContext context) => Container(
-    width: 220,
-    decoration: BoxDecoration(color: C.card, borderRadius: BorderRadius.circular(14),
-      border: Border.all(color: C.green.withOpacity(0.2))),
-    padding: const EdgeInsets.all(14),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Container(width: 36, height: 36,
-          decoration: BoxDecoration(color: C.greenBg, borderRadius: BorderRadius.circular(10)),
-          child: Icon(Icons.card_giftcard, color: C.green, size: 20)),
-        const SizedBox(width: 10),
-        Expanded(child: Text(combo.nombre,
-          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text),
-          maxLines: 1, overflow: TextOverflow.ellipsis)),
+  @override Widget build(BuildContext context) => GestureDetector(
+    onTap: () => showModalBottomSheet(
+      context: context, backgroundColor: Colors.transparent, isScrollControlled: true,
+      builder: (_) => _ComboDetalleSheet(combo: combo)),
+    child: Container(
+      width: 220,
+      decoration: BoxDecoration(color: C.card, borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: C.green.withOpacity(0.2))),
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 36, height: 36,
+            decoration: BoxDecoration(color: C.greenBg, borderRadius: BorderRadius.circular(10)),
+            child: Icon(Icons.card_giftcard, color: C.green, size: 20)),
+          const SizedBox(width: 10),
+          Expanded(child: Text(combo.nombre,
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text),
+            maxLines: 1, overflow: TextOverflow.ellipsis)),
+          Icon(Icons.chevron_right, size: 18, color: C.textMut),
+        ]),
+        const SizedBox(height: 8),
+        Text(combo.descripcion, style: TextStyle(fontSize: 11, color: C.textSec, height: 1.4), maxLines: 2, overflow: TextOverflow.ellipsis),
+        const Spacer(),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text(fmt(combo.precio),
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: C.green)),
+          if (combo.ahorro > 0)
+            Container(padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(color: C.red.withOpacity(0.1), borderRadius: BorderRadius.circular(100)),
+              child: Text('Ahorras ${fmt(combo.ahorro)}', style: TextStyle(fontSize: 10, color: C.red, fontWeight: FontWeight.w700))),
+        ]),
       ]),
-      const SizedBox(height: 8),
-      Text(combo.descripcion, style: TextStyle(fontSize: 11, color: C.textSec, height: 1.4), maxLines: 2, overflow: TextOverflow.ellipsis),
-      const Spacer(),
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Text(fmt(combo.precio),
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: C.green)),
-        if (combo.ahorro > 0)
-          Container(padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-            decoration: BoxDecoration(color: C.red.withOpacity(0.1), borderRadius: BorderRadius.circular(100)),
-            child: Text('Ahorras ${fmt(combo.ahorro)}', style: TextStyle(fontSize: 10, color: C.red, fontWeight: FontWeight.w700))),
-      ]),
-    ]),
+    ),
   );
+}
+
+// ── Detalle completo de un combo (misma información que la web:
+// productos que lo componen sin truncar, ahorro, fecha de inicio y fecha
+// de fin — esta última solo si el combo la tiene definida) ────────────
+class _ComboDetalleSheet extends StatelessWidget {
+  final Combo combo;
+  const _ComboDetalleSheet({required this.combo});
+
+  @override Widget build(BuildContext context) => DraggableScrollableSheet(
+    initialChildSize: 0.6, minChildSize: 0.3, maxChildSize: 0.9, expand: false,
+    builder: (context, scrollCtrl) => Container(
+      decoration: BoxDecoration(color: C.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+      child: ListView(controller: scrollCtrl, padding: const EdgeInsets.all(20), children: [
+        Center(child: Container(width: 36, height: 4, margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(color: C.border, borderRadius: BorderRadius.circular(100)))),
+
+        Row(children: [
+          Container(width: 44, height: 44,
+            decoration: BoxDecoration(color: C.greenBg, borderRadius: BorderRadius.circular(12)),
+            child: const Icon(Icons.card_giftcard, color: C.green, size: 24)),
+          const SizedBox(width: 12),
+          Expanded(child: Text(combo.nombre,
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: C.text))),
+        ]),
+
+        if (combo.descripcion.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Text(combo.descripcion, style: TextStyle(fontSize: 13, color: C.textSec, height: 1.5)),
+        ],
+
+        // ── Vigencia: solo se muestra cada fecha si el combo la tiene ──
+        if (combo.fechaInicio != null || combo.fechaFin != null) ...[
+          const SizedBox(height: 14),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            if (combo.fechaInicio != null)
+              _ChipFecha(icono: Icons.event_available_outlined, texto: 'Desde ${fmtFechaEsDate(combo.fechaInicio!)}'),
+            if (combo.fechaFin != null)
+              _ChipFecha(icono: Icons.event_busy_outlined, texto: 'Hasta ${fmtFechaEsDate(combo.fechaFin!)}'),
+          ]),
+        ],
+
+        const SizedBox(height: 18),
+        Text('Incluye', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text)),
+        const SizedBox(height: 10),
+        if (combo.items.isEmpty)
+          Text('Este combo no tiene productos detallados.', style: TextStyle(fontSize: 12, color: C.textMut))
+        else
+          Container(padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: C.surf2, borderRadius: BorderRadius.circular(12)),
+            child: Column(children: [
+              for (final item in combo.items) ...[
+                Row(children: [
+                  const Icon(Icons.check_circle_outline, size: 16, color: C.green),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(item['nombre']?.toString() ?? '—',
+                    style: TextStyle(fontSize: 13, color: C.text))),
+                ]),
+                if (item != combo.items.last) const SizedBox(height: 8),
+              ],
+            ])),
+
+        const SizedBox(height: 20),
+        Container(padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: C.greenBg, borderRadius: BorderRadius.circular(14)),
+          child: Row(children: [
+            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Precio del combo', style: TextStyle(fontSize: 11, color: C.textSec)),
+              Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                Text(fmt(combo.precio), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: C.green)),
+                if (combo.totalOriginal > combo.precio) ...[
+                  const SizedBox(width: 8),
+                  Text(fmt(combo.totalOriginal), style: TextStyle(fontSize: 13, color: C.textMut,
+                    decoration: TextDecoration.lineThrough)),
+                ],
+              ]),
+            ]),
+            const Spacer(),
+            if (combo.ahorro > 0)
+              Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(color: C.red, borderRadius: BorderRadius.circular(100)),
+                child: Text('Ahorras ${fmt(combo.ahorro)}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.w700))),
+          ])),
+
+        const SizedBox(height: 16),
+        ElevatedButton.icon(
+          onPressed: () {
+            if (!ensureLoggedIn(context)) return;
+            AppState.instance.addComboToCart(combo);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('${combo.nombre} agregado al carrito ✓'),
+              backgroundColor: C.green, duration: const Duration(seconds: 2)));
+            Navigator.pop(context);
+          },
+          icon: const Icon(Icons.add_shopping_cart, size: 18),
+          label: const Text('Agregar al carrito')),
+
+        const SizedBox(height: 24),
+      ]),
+    ),
+  );
+}
+
+class _ChipFecha extends StatelessWidget {
+  final IconData icono; final String texto;
+  const _ChipFecha({required this.icono, required this.texto});
+  @override Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(color: C.surf2, borderRadius: BorderRadius.circular(8)),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icono, size: 14, color: C.textSec),
+      const SizedBox(width: 6),
+      Text(texto, style: TextStyle(fontSize: 12, color: C.textSec, fontWeight: FontWeight.w600)),
+    ]));
 }
 
 class _InfoCafe extends StatelessWidget {

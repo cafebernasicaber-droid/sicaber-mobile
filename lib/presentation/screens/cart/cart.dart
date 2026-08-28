@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/theme/theme.dart';
 import '../../../data/models/models.dart';
 import '../../../data/services/api_service.dart';
@@ -154,6 +155,10 @@ class _ChkState extends State<CheckoutScreen> {
 
   Uint8List? _comprobanteBytes;
   bool       _cargandoComprobante = false;
+  // true cuando el cliente eligió "Enviar por WhatsApp" en vez de subir la
+  // imagen directo en la app — alternativa a _comprobanteBytes, nunca los
+  // dos a la vez (ver _enviarPorWhatsapp/_seleccionarComprobante).
+  bool       _comprobanteViaWhatsApp = false;
 
   bool _cargandoLocales = true;
 
@@ -198,7 +203,9 @@ class _ChkState extends State<CheckoutScreen> {
       if (archivo != null) {
         final bytes = await archivo.readAsBytes();
         if (!mounted) return;
-        setState(() => _comprobanteBytes = bytes);
+        // Subir una imagen y "Enviar por WhatsApp" son alternativas
+        // excluyentes — elegir una descarta la otra.
+        setState(() { _comprobanteBytes = bytes; _comprobanteViaWhatsApp = false; });
       }
     } catch (e) {
       if (!mounted) return;
@@ -211,16 +218,44 @@ class _ChkState extends State<CheckoutScreen> {
 
   void _quitarComprobante() => setState(() => _comprobanteBytes = null);
 
-  Future<void> _confirmar() async {
-    if (_requiereComprobante && _comprobanteBytes == null) {
+  // ── Alternativa: enviar el comprobante por WhatsApp ────────────
+  // Abre un chat de WhatsApp con el número del negocio y un mensaje
+  // prellenado, para que el cliente mande la foto del pago por ahí en vez
+  // de subirla en la app. El pedido igual queda "en verificación" (ver
+  // AppState.crearPedido) para que el cajero sepa que debe revisar el chat.
+  Future<void> _enviarPorWhatsapp() async {
+    final mensaje = 'Hola, les envío el comprobante de pago de mi pedido en Café Don Berna.\n'
+      'Método de pago: $_metodo\nTotal: ${fmt(AppState.instance.cartTotal)}';
+    final url = whatsappUrl(mensaje);
+    bool abierto = false;
+    try {
+      abierto = await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      abierto = false;
+    }
+    if (!mounted) return;
+    if (abierto) {
+      // Excluyente con la imagen subida en la app.
+      setState(() { _comprobanteViaWhatsApp = true; _comprobanteBytes = null; });
+    } else {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Debes subir el comprobante de pago antes de continuar'),
+        content: Text('No se pudo abrir WhatsApp. ¿Tienes la app instalada?'),
+        backgroundColor: C.red));
+    }
+  }
+
+  void _cambiarMetodoComprobante() => setState(() => _comprobanteViaWhatsApp = false);
+
+  Future<void> _confirmar() async {
+    if (_requiereComprobante && _comprobanteBytes == null && !_comprobanteViaWhatsApp) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Sube el comprobante de pago o envíalo por WhatsApp antes de continuar'),
         backgroundColor: C.red));
       return;
     }
     setState(() => _loading = true);
     try {
-      final comprobanteBase64 = _requiereComprobante
+      final comprobanteBase64 = (_requiereComprobante && _comprobanteBytes != null)
           ? 'data:image/jpeg;base64,${base64Encode(_comprobanteBytes!)}'
           : null;
       final esDomicilio = _tipoEntrega == 'domicilio';
@@ -239,7 +274,8 @@ class _ChkState extends State<CheckoutScreen> {
         direccionEntrega: esDomicilio && dirAlterna.isNotEmpty ? dirAlterna : null,
         tipoEntrega: esDomicilio ? 'domicilio' : 'local',
         localId: esDomicilio ? null : _localId,
-        comprobante: comprobanteBase64);
+        comprobante: comprobanteBase64,
+        comprobanteViaWhatsApp: _requiereComprobante && _comprobanteViaWhatsApp);
       if (!mounted) return;
       context.go('/pedidos/${pedido.id}');
       ScaffoldMessenger.of(context).showSnackBar(
@@ -447,48 +483,59 @@ class _ChkState extends State<CheckoutScreen> {
         const SizedBox(height: 22),
         Text('Comprobante de pago', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: C.text)),
         const SizedBox(height: 4),
-        Text('Sube una foto o captura de pantalla del pago ($_metodo)',
+        Text('Sube una foto o captura de pantalla del pago ($_metodo), o envíala por WhatsApp',
           style: TextStyle(fontSize: 12, color: C.textSec)),
         const SizedBox(height: 10),
-        GestureDetector(
-          onTap: _cargandoComprobante ? null : _seleccionarComprobante,
-          child: _comprobanteBytes == null
-              ? Container(
-                  width: double.infinity, height: 140,
-                  decoration: BoxDecoration(
-                    color: C.surf2, borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: C.border)),
-                  child: Center(
-                    child: _cargandoComprobante
-                        ? const CircularProgressIndicator(color: C.green, strokeWidth: 2)
-                        : Column(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.cloud_upload_outlined, size: 30, color: C.textMut),
-                            const SizedBox(height: 8),
-                            Text('Toca para subir el comprobante',
-                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)),
-                          ])))
-              : Container(
-                  clipBehavior: Clip.antiAlias,
-                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
-                  child: Stack(children: [
-                    Image.memory(_comprobanteBytes!,
-                      width: double.infinity, height: 180, fit: BoxFit.cover),
-                    Positioned(top: 8, right: 8,
-                      child: GestureDetector(
-                        onTap: _quitarComprobante,
-                        child: Container(padding: const EdgeInsets.all(6),
-                          decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
-                          child: const Icon(Icons.close, color: Colors.white, size: 16)))),
-                    Positioned(bottom: 8, left: 8,
-                      child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
-                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.check_circle, color: C.green, size: 14),
-                          SizedBox(width: 4),
-                          Text('Comprobante cargado', style: TextStyle(color: Colors.white, fontSize: 11)),
-                        ]))),
-                  ])),
-        ),
+        if (_comprobanteViaWhatsApp)
+          _ComprobanteWhatsappConfirmado(onCambiar: _cambiarMetodoComprobante)
+        else ...[
+          GestureDetector(
+            onTap: _cargandoComprobante ? null : _seleccionarComprobante,
+            child: _comprobanteBytes == null
+                ? Container(
+                    width: double.infinity, height: 140,
+                    decoration: BoxDecoration(
+                      color: C.surf2, borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: C.border)),
+                    child: Center(
+                      child: _cargandoComprobante
+                          ? const CircularProgressIndicator(color: C.green, strokeWidth: 2)
+                          : Column(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.cloud_upload_outlined, size: 30, color: C.textMut),
+                              const SizedBox(height: 8),
+                              Text('Toca para subir el comprobante',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)),
+                            ])))
+                : Container(
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
+                    child: Stack(children: [
+                      Image.memory(_comprobanteBytes!,
+                        width: double.infinity, height: 180, fit: BoxFit.cover),
+                      Positioned(top: 8, right: 8,
+                        child: GestureDetector(
+                          onTap: _quitarComprobante,
+                          child: Container(padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                            child: const Icon(Icons.close, color: Colors.white, size: 16)))),
+                      Positioned(bottom: 8, left: 8,
+                        child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
+                          child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.check_circle, color: C.green, size: 14),
+                            SizedBox(width: 4),
+                            Text('Comprobante cargado', style: TextStyle(color: Colors.white, fontSize: 11)),
+                          ]))),
+                    ])),
+          ),
+          const SizedBox(height: 14),
+          const _DivisorO(),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: _enviarPorWhatsapp,
+            icon: const Icon(Icons.chat_outlined, size: 18),
+            label: const Text('Enviar comprobante por WhatsApp')),
+        ],
       ] else ...[
         const SizedBox(height: 22),
         Container(padding: const EdgeInsets.all(12),
@@ -529,19 +576,57 @@ class _ChkState extends State<CheckoutScreen> {
           child: const Text('← Atrás'))),
         const SizedBox(width: 12),
         Expanded(child: ElevatedButton(
-          onPressed: (_loading || items.isEmpty || (_requiereComprobante && _comprobanteBytes == null)) ? null : _confirmar,
+          onPressed: (_loading || items.isEmpty
+              || (_requiereComprobante && _comprobanteBytes == null && !_comprobanteViaWhatsApp)) ? null : _confirmar,
           child: _loading
               ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
               : const Text('Confirmar pedido ✓'))),
       ]),
-      if (_requiereComprobante && _comprobanteBytes == null) ...[
+      if (_requiereComprobante && _comprobanteBytes == null && !_comprobanteViaWhatsApp) ...[
         const SizedBox(height: 8),
-        Center(child: Text('Sube el comprobante de pago para continuar',
+        Center(child: Text('Sube el comprobante de pago o envíalo por WhatsApp para continuar',
           style: TextStyle(fontSize: 12, color: C.textMut))),
       ],
       const SizedBox(height: 40),
     ]);
   }
+}
+
+// ── Separador "o" entre subir la imagen y enviarla por WhatsApp ──
+class _DivisorO extends StatelessWidget {
+  const _DivisorO();
+  @override Widget build(BuildContext context) => Row(children: [
+    Expanded(child: Divider(color: C.border)),
+    Padding(padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Text('o', style: TextStyle(fontSize: 12, color: C.textMut, fontWeight: FontWeight.w600))),
+    Expanded(child: Divider(color: C.border)),
+  ]);
+}
+
+// ── Confirmación de "comprobante por WhatsApp" ya elegido ────────
+class _ComprobanteWhatsappConfirmado extends StatelessWidget {
+  final VoidCallback onCambiar;
+  const _ComprobanteWhatsappConfirmado({required this.onCambiar});
+
+  @override Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(color: C.greenBg, borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: C.green.withOpacity(0.3))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Icon(Icons.check_circle, color: C.green, size: 20),
+        const SizedBox(width: 8),
+        Expanded(child: Text('Vas a enviar el comprobante por WhatsApp',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: C.text))),
+      ]),
+      const SizedBox(height: 6),
+      Text('Recuerda mandar la foto del pago en el chat que se abrió. Tu pedido queda en verificación hasta que el cajero la revise.',
+        style: TextStyle(fontSize: 12, color: C.textSec)),
+      const SizedBox(height: 10),
+      GestureDetector(onTap: onCambiar,
+        child: Text('Subir la imagen en la app en su lugar',
+          style: TextStyle(fontSize: 12, color: C.green, fontWeight: FontWeight.w700, decoration: TextDecoration.underline))),
+    ]));
 }
 
 // ── Indicador simple de paso (1/2, 1/3, etc.) ──────────────────

@@ -252,8 +252,23 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 }
 
 // ── Formulario "Solicitar devolución" ──────────────────────────
-// POST /api/devoluciones (pedido_id + motivo) — queda "pendiente" para
-// que el staff la revise, no cambia el estado del pedido por sí sola.
+// POST /api/devoluciones (pedido_id + items + motivo) — queda "pendiente"
+// para que el staff la revise, no cambia el estado del pedido por sí sola.
+// El cliente marca con checkboxes cuáles productos del pedido quiere
+// devolver (puede ser más de uno), pero escribe un solo motivo para toda
+// la solicitud — ver AppState.solicitarDevolucion.
+const _kMaxPalabrasMotivo = 20;
+
+int _contarPalabras(String s) => s.trim().isEmpty ? 0 : s.trim().split(RegExp(r'\s+')).length;
+
+// Si el texto ya tiene más de `max` palabras, lo recorta ahí mismo — así
+// el límite se aplica mientras el cliente escribe, no solo al enviar.
+String _limitarPalabras(String s, int max) {
+  final matches = RegExp(r'\S+').allMatches(s).toList();
+  if (matches.length <= max) return s;
+  return s.substring(0, matches[max - 1].end);
+}
+
 class _DevolucionDialog extends StatefulWidget {
   final Pedido pedido;
   const _DevolucionDialog({required this.pedido});
@@ -264,17 +279,48 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
   final _motivoCtrl = TextEditingController();
   bool    _enviando = false;
   String? _error;
+  int     _palabras = 0;
+  final Set<CartItem> _seleccionados = {};
+
+  @override void initState() {
+    super.initState();
+    // Un solo producto en el pedido: se preselecciona, no hace falta marcarlo.
+    if (widget.pedido.items.length == 1) _seleccionados.add(widget.pedido.items.first);
+    _motivoCtrl.addListener(_onMotivoChanged);
+  }
+
+  void _onMotivoChanged() {
+    final texto = _motivoCtrl.text;
+    final limitado = _limitarPalabras(texto, _kMaxPalabrasMotivo);
+    if (limitado != texto) {
+      // Recortar dispara este mismo listener de nuevo (value setter), pero
+      // la segunda pasada ya entra por la rama de arriba (limitado == texto).
+      _motivoCtrl.value = TextEditingValue(
+        text: limitado, selection: TextSelection.collapsed(offset: limitado.length));
+      return;
+    }
+    setState(() => _palabras = _contarPalabras(texto));
+  }
+
+  void _toggle(CartItem item) => setState(() {
+    if (!_seleccionados.remove(item)) _seleccionados.add(item);
+    _error = null;
+  });
 
   @override void dispose() { _motivoCtrl.dispose(); super.dispose(); }
 
   Future<void> _enviar() async {
     final motivo = _motivoCtrl.text.trim();
+    if (_seleccionados.isEmpty) {
+      setState(() => _error = 'Elige al menos un producto para devolver');
+      return;
+    }
     if (motivo.isEmpty) {
       setState(() => _error = 'Cuéntanos por qué quieres la devolución');
       return;
     }
     setState(() { _enviando = true; _error = null; });
-    final err = await AppState.instance.solicitarDevolucion(widget.pedido.id, motivo);
+    final err = await AppState.instance.solicitarDevolucion(widget.pedido.id, motivo, _seleccionados.toList());
     if (!mounted) return;
     if (err != null) {
       setState(() { _enviando = false; _error = err; });
@@ -283,24 +329,71 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
     Navigator.pop(context, true);
   }
 
-  @override Widget build(BuildContext context) => AlertDialog(
-    backgroundColor: C.card,
-    title: const Text('Solicitar devolución'),
-    content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('¿Por qué quieres la devolución?', style: TextStyle(fontSize: 13, color: C.textSec)),
-      const SizedBox(height: 8),
-      TextField(controller: _motivoCtrl, maxLines: 3, autofocus: true, style: TextStyle(color: C.text),
-        decoration: const InputDecoration(hintText: 'Cuéntanos qué pasó...')),
-      if (_error != null) Padding(padding: const EdgeInsets.only(top: 8),
-        child: Text(_error!, style: const TextStyle(color: C.red, fontSize: 12))),
-    ]),
-    actions: [
-      TextButton(onPressed: _enviando ? null : () => Navigator.pop(context, false), child: const Text('Cancelar')),
-      TextButton(onPressed: _enviando ? null : _enviar,
-        child: _enviando
-          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.green))
-          : const Text('Enviar', style: TextStyle(color: C.green, fontWeight: FontWeight.w700))),
-    ]);
+  @override Widget build(BuildContext context) {
+    final items = widget.pedido.items;
+    return AlertDialog(
+      backgroundColor: C.card,
+      title: const Text('Solicitar devolución'),
+      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (items.isNotEmpty) ...[
+          Text(items.length > 1 ? '¿Qué productos quieres devolver?' : 'Producto a devolver',
+            style: TextStyle(fontSize: 13, color: C.textSec)),
+          const SizedBox(height: 8),
+          for (final item in items) ...[
+            _ProductoDevolucionOpcion(
+              item: item,
+              seleccionado: _seleccionados.contains(item),
+              onTap: () => _toggle(item)),
+            if (item != items.last) const SizedBox(height: 6),
+          ],
+          const SizedBox(height: 16),
+        ],
+        Text('¿Por qué quieres la devolución?', style: TextStyle(fontSize: 13, color: C.textSec)),
+        const SizedBox(height: 8),
+        TextField(controller: _motivoCtrl, maxLines: 3, autofocus: items.length <= 1, style: TextStyle(color: C.text),
+          decoration: const InputDecoration(hintText: 'Cuéntanos qué pasó...')),
+        const SizedBox(height: 4),
+        Align(alignment: Alignment.centerRight,
+          child: Text('$_palabras/$_kMaxPalabrasMotivo palabras',
+            style: TextStyle(fontSize: 11,
+              color: _palabras >= _kMaxPalabrasMotivo ? C.red : C.textMut))),
+        if (_error != null) Padding(padding: const EdgeInsets.only(top: 8),
+          child: Text(_error!, style: const TextStyle(color: C.red, fontSize: 12))),
+      ])),
+      actions: [
+        TextButton(onPressed: _enviando ? null : () => Navigator.pop(context, false), child: const Text('Cancelar')),
+        TextButton(onPressed: _enviando ? null : _enviar,
+          child: _enviando
+            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.green))
+            : const Text('Enviar', style: TextStyle(color: C.green, fontWeight: FontWeight.w700))),
+      ]);
+  }
+}
+
+// ── Opción seleccionable de producto dentro del diálogo de devolución ──
+class _ProductoDevolucionOpcion extends StatelessWidget {
+  final CartItem item;
+  final bool seleccionado;
+  final VoidCallback onTap;
+  const _ProductoDevolucionOpcion({required this.item, required this.seleccionado, required this.onTap});
+
+  @override Widget build(BuildContext context) => GestureDetector(onTap: onTap,
+    child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: seleccionado ? C.greenBg : C.surf2,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: seleccionado ? C.green : C.border)),
+      child: Row(children: [
+        Icon(seleccionado ? Icons.check_box : Icons.check_box_outline_blank,
+          size: 18, color: seleccionado ? C.green : C.textMut),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${item.cantidad}× ${item.producto.nombre}',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.text)),
+          if (item.nombresExtras.isNotEmpty)
+            Text(item.nombresExtras.join(', '), style: TextStyle(fontSize: 11, color: C.textMut)),
+        ])),
+      ])));
 }
 
 // ── Tarjeta de entrega + timeline de estados ──────────────────
@@ -362,7 +455,12 @@ class _EstadoStepper extends StatelessWidget {
       for (var i = 0; i < pasos.length; i++)
         _PasoTimeline(
           estado: pasos[i],
-          completado: i < actual,
+          // El último paso (entregado) no tiene un paso siguiente que lo
+          // deje "superado" — llegar ahí YA es la meta. Sin este OR se
+          // quedaba marcado para siempre como "en curso" (punto
+          // parpadeante) en vez de completado (check verde), aunque el
+          // pedido realmente ya estuviera entregado.
+          completado: i < actual || (i == actual && i == pasos.length - 1),
           esActual: i == actual,
           esUltimo: i == pasos.length - 1,
           sub: i == 0 ? _subEstadoPago(esActual: i == actual, completado: i < actual) : null,

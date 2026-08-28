@@ -440,7 +440,7 @@ class AppState extends ChangeNotifier {
   // producto es el mismo pero la personalización difiere, queda como una
   // unidad aparte — cada combinación de extras es, para el carrito, un
   // ítem distinto.
-  void addToCart(Producto p, {List<Topping> toppings = const [], List<Adicion> adiciones = const [], int cantidad = 1}) {
+  void addToCart(Producto p, {List<Topping> toppings = const [], List<Adicion> adiciones = const [], int cantidad = 1, int? comboId}) {
     final topIds = toppings.map((t) => t.id).toSet();
     final addIds = adiciones.map((a) => a.id).toSet();
     final idx = _carrito.indexWhere((i) =>
@@ -454,9 +454,24 @@ class AppState extends ChangeNotifier {
       _carrito[idx].cantidad += cantidad;
     } else {
       final key = '${p.id}-${DateTime.now().millisecondsSinceEpoch}';
-      _carrito.add(CartItem(cartKey: key, producto: p, cantidad: cantidad, toppings: toppings, adiciones: adiciones));
+      _carrito.add(CartItem(cartKey: key, producto: p, cantidad: cantidad, toppings: toppings, adiciones: adiciones, comboId: comboId));
     }
     notifyListeners();
+  }
+
+  // ── Agregar un combo completo al carrito ──────────────────────
+  // Los combos se venden "tal cual" (igual que el botón "+" de un combo en
+  // la web): sin pantalla de personalización de toppings/adiciones. Se
+  // envuelve en un Producto sintético con id negativo (nunca choca con un
+  // id real de producto, que siempre es positivo) solo para poder reusar
+  // CartItem/addToCart sin cambiarlos de raíz — lo que en verdad identifica
+  // el combo de cara al backend es `comboId` (ver CartItem y
+  // AppState.crearPedido).
+  void addComboToCart(Combo combo) {
+    final productoCombo = Producto(
+      id: -combo.id, nombre: combo.nombre, descripcion: combo.descripcion,
+      categoria: 'Combo', precio: combo.precio, imagen: combo.imagen);
+    addToCart(productoCombo, comboId: combo.id);
   }
 
   void removeFromCart(String key) {
@@ -535,10 +550,17 @@ class AppState extends ChangeNotifier {
     String tipoEntrega = 'local',
     String? comprobante, // imagen del pago en base64 (data URL)
     int? localId, // solo aplica si tipoEntrega == 'local' — ver GET /api/locales
+    // true cuando el cliente eligió "Enviar por WhatsApp" en vez de subir
+    // la imagen directo en la app — ver _AlternativaWhatsapp en checkout.dart.
+    // El pedido igual nace en verificación de pago (el cajero debe revisar
+    // el chat de WhatsApp del negocio), pero sin comprobante_img adjunto.
+    bool comprobanteViaWhatsApp = false,
   }) async {
-    // Con comprobante adjunto el pedido nace en verificación de pago;
-    // sin comprobante arranca directo en "pendiente" (pago confirmado).
-    final estadoInicial = comprobante != null ? 'pendiente_verificacion' : 'pendiente';
+    // Con comprobante adjunto (subido en la app O avisado por WhatsApp) el
+    // pedido nace en verificación de pago; solo si no hay ninguno de los
+    // dos (ej. Efectivo) arranca directo en "pendiente" (pago confirmado).
+    final estadoInicial = (comprobante != null || comprobanteViaWhatsApp)
+        ? 'pendiente_verificacion' : 'pendiente';
     // Antes este error se ignoraba silenciosamente (catch (_) {}) y el pedido
     // se guardaba como "exitoso" localmente aunque el backend fallara.
     // Ahora se propaga para que la pantalla de checkout pueda mostrar el error real.
@@ -557,7 +579,12 @@ class AppState extends ChangeNotifier {
       'cliente_id': _usuario?.id,
       'cliente':    _usuario?.nombre ?? 'App móvil',
       'items': _carrito.map((i) => {
-        'id': i.producto.id, 'nombre': i.producto.nombre,
+        // Un combo se manda como "combo-<id>" (string), igual que hace la
+        // web (ver addToCart en Landing.jsx) — así el backend/historial
+        // puede distinguirlo de un producto real con id numérico. Ver
+        // CartItem.comboId / AppState.addComboToCart.
+        'id': i.comboId != null ? 'combo-${i.comboId}' : i.producto.id,
+        'nombre': i.producto.nombre,
         'precio': i.producto.precio, 'cantidad': i.cantidad,
         'precioTotal': i.subtotal,
         // Toppings tal como quedaron tras deseleccionar en el detalle del
@@ -580,6 +607,7 @@ class AppState extends ChangeNotifier {
       if (tipoEntrega == 'local' && localId != null) 'local_id': localId,
       if (comprobante != null) 'comprobante_img': comprobante,
       if (comprobante != null) 'comprobante': 'Comprobante subido desde la app móvil',
+      if (comprobante == null && comprobanteViaWhatsApp) 'comprobante': 'Comprobante enviado por WhatsApp',
     });
     final sync = PedidoSync.fromJson(row as Map<String, dynamic>);
     final pedido = Pedido(
@@ -639,18 +667,28 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Solicitar devolución de un pedido entregado ───────────────
-  // POST /api/devoluciones (ver sicaber-backend/src/routes/index.js):
-  // solo pedido_id es obligatorio en el backend, pero acá se exige motivo
-  // también (el formulario de la app lo pide). Queda "pendiente" para que
-  // el staff la revise — no cambia el estado del pedido por sí sola.
-  Future<String?> solicitarDevolucion(String pedidoId, String motivo) async {
+  // ── Solicitar devolución de uno o varios productos de un pedido ────
+  // POST /api/devoluciones con el formato que soporta el backend:
+  // { pedido_id, items: [{producto_id, cantidad}, ...], motivo } — el
+  // cliente puede marcar varios productos del mismo pedido (checkboxes en
+  // el diálogo, ver orders.dart), pero un solo motivo para toda la
+  // solicitud, no uno por producto. Queda "pendiente" para que el staff la
+  // revise — no cambia el estado del pedido por sí sola.
+  Future<String?> solicitarDevolucion(String pedidoId, String motivo, List<CartItem> productos) async {
+    if (productos.isEmpty) return 'Elige al menos un producto para devolver';
     final idx = _pedidos.indexWhere((p) => p.id == pedidoId);
     if (idx == -1) return 'Pedido no encontrado';
     final backendId = _pedidos[idx].backendId;
     if (backendId == null) return 'Pedido no sincronizado con el servidor';
     try {
-      await _api.post('/devoluciones', {'pedido_id': backendId, 'motivo': motivo});
+      await _api.post('/devoluciones', {
+        'pedido_id': backendId,
+        'items': productos.map((p) => {
+          'producto_id': p.producto.id,
+          'cantidad': p.cantidad,
+        }).toList(),
+        'motivo': motivo,
+      });
       return null;
     } on ApiException catch (e) {
       return e.message;

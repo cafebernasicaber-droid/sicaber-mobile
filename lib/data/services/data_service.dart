@@ -22,6 +22,18 @@ const contacto = {
   'municipio':   'Medellín, Antioquia',
 };
 
+// ── WHATSAPP DEL NEGOCIO ─────────────────────────────────────
+// Mismo número que contacto['telefono'], pero en formato E.164 sin
+// espacios ni signos — lo que exige el enlace wa.me. +57 = Colombia.
+final String telefonoWhatsappNegocio =
+  '57${contacto['telefono']!.replaceAll(RegExp(r'\D'), '')}';
+
+// Arma el enlace "https://wa.me/<numero>?text=<mensaje>" para abrir un chat
+// de WhatsApp con el negocio ya con un mensaje prellenado (usado como
+// alternativa a subir el comprobante directo en la app — ver checkout.dart).
+Uri whatsappUrl(String mensaje) => Uri.parse(
+  'https://wa.me/$telefonoWhatsappNegocio?text=${Uri.encodeComponent(mensaje)}');
+
 // ── HELPERS ──────────────────────────────────────────────────
 String fmt(double n) => '\$${n.toStringAsFixed(0).replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (m) => '.')}';
 
@@ -35,5 +47,9 @@ String fmtFechaEs(String? iso) {
   if (iso == null || iso.isEmpty) return '—';
   final d = DateTime.tryParse(iso);
   if (d == null) return '—';
-  return '${d.day} de ${_mesesEs[d.month - 1]} de ${d.year}';
+  return fmtFechaEsDate(d);
 }
+
+// Mismo formato que fmtFechaEs, pero partiendo de un DateTime ya parseado
+// (ej. Combo.fechaInicio/fechaFin) en vez de un string ISO crudo.
+String fmtFechaEsDate(DateTime d) => '${d.day} de ${_mesesEs[d.month - 1]} de ${d.year}';

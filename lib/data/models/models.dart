@@ -50,11 +50,16 @@ class Combo {
   final String? imagen;
   final bool   estado;
   final List<Map<String, dynamic>> items; // viene del campo jsonb "items"
+  // Vigencia del combo (igual que la web: Landing.jsx/CombosPage.jsx solo
+  // muestran estas fechas cuando el combo las tiene definidas — un combo
+  // sin fecha de inicio/fin no tiene límite de tiempo).
+  final DateTime? fechaInicio;
+  final DateTime? fechaFin;
 
   const Combo({
     required this.id, required this.nombre, required this.precio,
     this.descripcion = '', this.imagen, this.estado = true,
-    this.items = const [],
+    this.items = const [], this.fechaInicio, this.fechaFin,
   });
 
   // El "ahorro" se calcula sumando precioOriginal de cada item del combo (si viene informado)
@@ -62,6 +67,16 @@ class Combo {
     items.fold(0.0, (s, it) => s + ((it['precioOriginal'] ?? it['precio'] ?? 0) as num).toDouble());
 
   double get ahorro => totalOriginal > precio ? totalOriginal - precio : 0;
+
+  // true si hoy cae dentro de [fechaInicio, fechaFin] — igual que
+  // Promocion.vigente. Un combo sin ninguna de las dos fechas está
+  // siempre vigente (no tiene límite de tiempo).
+  bool get vigente {
+    final now = DateTime.now();
+    if (fechaInicio != null && now.isBefore(fechaInicio!)) return false;
+    if (fechaFin != null && now.isAfter(fechaFin!)) return false;
+    return true;
+  }
 
   // Compatibilidad con código viejo que usaba productosIncluidos/adicionesIncluidas
   List<Map<String, dynamic>> get productosIncluidos => items;
@@ -113,10 +128,18 @@ class CartItem {
   int            cantidad;
   final List<Topping> toppings;
   final List<Adicion> adiciones;
+  // Solo distinto de null cuando este ítem es un combo agregado completo
+  // (ver AppState.addComboToCart) — `producto` es entonces un Producto
+  // sintético (id negativo, solo para mostrarlo con el resto del carrito),
+  // y este es el id REAL del combo en la tabla `combos`. Al armar el POST
+  // /pedidos, AppState.crearPedido usa esto para mandar 'id': 'combo-<id>'
+  // en vez del id numérico — mismo formato que ya usa la web para vender
+  // combos (ver addToCart en Landing.jsx).
+  final int? comboId;
 
   CartItem({
     required this.cartKey, required this.producto, this.cantidad = 1,
-    this.toppings = const [], this.adiciones = const [],
+    this.toppings = const [], this.adiciones = const [], this.comboId,
   });
 
   double get extraTotal =>
@@ -155,7 +178,11 @@ class Pedido {
   });
 
   // Secuencia real de estados que recorre un pedido en el backend.
-  // 'cancelado' queda fuera: es un estado especial, no un paso más.
+  // 'entregado' es el ÚLTIMO paso (índice 4, el final de la lista) — no un
+  // estado aparte: cuando el pedido llega ahí, el paso a paso lo debe
+  // mostrar como completado, no como "en curso" (ver _EstadoStepper en
+  // orders.dart). 'cancelado' queda fuera: es un estado especial, no un
+  // paso más.
   static const List<String> secuencia = [
     'pendiente_verificacion', 'pendiente', 'en_preparacion', 'listo', 'entregado',
   ];
@@ -174,9 +201,33 @@ class Pedido {
     'pendiente':              0xFFFFB300,
     'en_preparacion':         0xFF42A5F5,
     'listo':                  0xFF4CAF50,
-    'entregado':              0xFF6B6355,
+    // Antes usaba el mismo gris que el color "de respaldo" para un estado
+    // desconocido (0xFF6B6355 — ver los "?? 0xFF6B6355" en orders.dart), así
+    // que un pedido ENTREGADO se veía igual de apagado que uno con un
+    // estado que la app ni siquiera reconoce. Verde oscuro propio, distinto
+    // del de "listo", para que se lea claramente como el paso final.
+    'entregado':              0xFF2E7D32,
     'cancelado':              0xFFE53935,
   };
+
+  // El backend/admin ha usado más de un nombre para el mismo paso
+  // intermedio ("en_proceso" en el panel de pedidos vs. "en_preparacion"
+  // acá) — sin esto, un pedido con ese estado no calza con nada de
+  // [secuencia] y su paso a paso se queda clavado en el primer paso en vez
+  // de avanzar.
+  static const Map<String, String> _aliasEstado = {
+    'en_proceso': 'en_preparacion',
+  };
+
+  // Limpia lo que venga del backend (espacios, mayúsculas, alias) ANTES de
+  // guardarlo en `estado` — así todo el resto del modelo (secuencia,
+  // estados, coloresEstado, esCancelado) puede comparar por igualdad simple
+  // sin que un estado real quede sin reconocer solo por venir con otro
+  // formato. Ver PedidoSync.fromJson, que es donde se aplica.
+  static String normalizarEstado(String raw) {
+    final limpio = raw.trim().toLowerCase();
+    return _aliasEstado[limpio] ?? limpio;
+  }
 
   bool get esCancelado => estado == 'cancelado';
 

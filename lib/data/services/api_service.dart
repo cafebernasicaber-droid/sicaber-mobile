@@ -161,19 +161,31 @@ extension LocalFromJson on Local {
 }
 
 extension ComboFromJson on Combo {
-  static Combo fromJson(Map<String, dynamic> j) {
-    final rawItems = j['items'];
-    List<Map<String, dynamic>> items = [];
-    if (rawItems is List) {
-      items = rawItems.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-    } else if (rawItems is String && rawItems.isNotEmpty) {
+  // Acepta las dos formas que se han visto en el backend: un solo campo
+  // "items" (jsonb unificado), o "productos"/"adiciones" por separado
+  // (como los devuelve GET /combos en Landing.jsx) — se combinan en un
+  // único listado para no depender de cuál de las dos esté vigente.
+  static List<Map<String, dynamic>> _parseItemList(dynamic raw) {
+    if (raw is List) return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    if (raw is String && raw.isNotEmpty) {
       try {
-        final decoded = jsonDecode(rawItems);
-        if (decoded is List) {
-          items = decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-        }
+        final decoded = jsonDecode(raw);
+        if (decoded is List) return decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       } catch (_) {}
     }
+    return const [];
+  }
+
+  static DateTime? _parseFecha(dynamic v) {
+    if (v == null) return null;
+    try { return DateTime.parse(v.toString()); } catch (_) { return null; }
+  }
+
+  static Combo fromJson(Map<String, dynamic> j) {
+    final itemsUnificados = _parseItemList(j['items']);
+    final items = itemsUnificados.isNotEmpty
+        ? itemsUnificados
+        : [..._parseItemList(j['productos']), ..._parseItemList(j['adiciones'])];
     return Combo(
       id:          j['id'] as int,
       nombre:      j['nombre'] as String,
@@ -182,6 +194,8 @@ extension ComboFromJson on Combo {
       imagen:      j['imagen'] as String?,
       estado:      (j['estado'] as String? ?? 'Activo') == 'Activo',
       items:       items,
+      fechaInicio: _parseFecha(j['fechaInicio'] ?? j['fecha_inicio']),
+      fechaFin:    _parseFecha(j['fechaFin'] ?? j['fecha_fin']),
     );
   }
 }
@@ -228,7 +242,10 @@ class PedidoSync {
 
   factory PedidoSync.fromJson(Map<String, dynamic> j) => PedidoSync(
     backendId: j['id'] as int,
-    estado: j['estado'] as String? ?? 'pendiente_verificacion',
+    // normalizarEstado limpia espacios/mayúsculas y resuelve alias (ej.
+    // "en_proceso" → "en_preparacion") para que Pedido.secuencia/estados/
+    // coloresEstado siempre lo reconozcan — ver Pedido.normalizarEstado.
+    estado: Pedido.normalizarEstado(j['estado'] as String? ?? 'pendiente_verificacion'),
     fecha: (j['created_at'] as String? ?? '').replaceFirst('T', ' ').replaceFirst(RegExp(r'\.\d+Z?$'), '').trim(),
     // "comprobante" en el backend es solo un texto corto (nombre de
     // archivo / "Enviado por WhatsApp" / etc.); la imagen real que revisa
