@@ -49,9 +49,11 @@
             <data android:mimeType="text/plain"/>
         </intent>
         <!-- Requerido por url_launcher en Android 11+ (package visibility)
-             para poder abrir enlaces https:// — como el wa.me que usa la
-             opción "Enviar comprobante por WhatsApp" del checkout — incluso
-             cuando lo que en verdad los intercepta es la app de WhatsApp. -->
+             para poder abrir enlaces https:// — hoy el único uso real es el
+             wa.me de "Contáctanos" en ProfileScreen (ver whatsappUrl en
+             data_service.dart), único punto de entrada a WhatsApp en toda
+             la app — incluso cuando lo que en verdad los intercepta es la
+             app de WhatsApp. -->
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>

@@ -37,16 +37,22 @@ const contacto = {
 };
 
 // ── WHATSAPP DEL NEGOCIO ─────────────────────────────────────
-// Mismo número que contacto['telefono'], pero en formato E.164 sin
-// espacios ni signos — lo que exige el enlace wa.me. +57 = Colombia.
-final String telefonoWhatsappNegocio =
-  '57${contacto['telefono']!.replaceAll(RegExp(r'\D'), '')}';
+// Única fuente de verdad del número — igual que hizo la web (misma ronda de
+// cambios: WHATSAPP_NUMERO). Antes se derivaba en tiempo de ejecución de
+// contacto['telefono'] (con espacios, pensado solo para mostrarse en
+// pantalla); ahora es un literal en formato E.164 (+57 = Colombia) fijo,
+// para que no dependa de que nadie mantenga sincronizados dos formatos del
+// mismo número.
+const whatsappNumero = '573246444774';
 
-// Arma el enlace "https://wa.me/<numero>?text=<mensaje>" para abrir un chat
-// de WhatsApp con el negocio ya con un mensaje prellenado (usado como
-// alternativa a subir el comprobante directo en la app — ver checkout.dart).
+// Único punto de entrada a WhatsApp en toda la app: el botón "Contáctanos"
+// de ProfileScreen. Ya NO existe ningún camino de WhatsApp en el pago, el
+// checkout, el comprobante o los pedidos — el comprobante se sube siempre
+// directo al sistema (ver cart.dart/orders.dart) y el motivo de un rechazo
+// se muestra en texto plano en la propia tarjeta del pedido, no dentro de
+// un mensaje de WhatsApp.
 Uri whatsappUrl(String mensaje) => Uri.parse(
-  'https://wa.me/$telefonoWhatsappNegocio?text=${Uri.encodeComponent(mensaje)}');
+  'https://wa.me/$whatsappNumero?text=${Uri.encodeComponent(mensaje)}');
 
 // ── VALIDACIÓN DE CONTRASEÑA ──────────────────────────────────
 // 10-20 caracteres, con al menos una mayúscula, una minúscula, un número y
