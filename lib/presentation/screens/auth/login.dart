@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/theme.dart';
 import '../../../data/services/app_state.dart';
-import '../../../data/services/data_service.dart';
 import '../../widgets/common/animations.dart';
+import '../../widgets/common/aviso_cobertura.dart';
 
 Widget _label(String t) => Padding(padding: EdgeInsets.only(bottom: 8),
   child: Text(t, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)));
@@ -17,20 +17,37 @@ Widget _err(String msg) => Container(
 
 // ── LOGIN ─────────────────────────────────────────────────────
 class LoginScreen extends StatefulWidget {
-  LoginScreen({super.key});
+  // Aviso a mostrar de entrada (ej. "tu registro con Google venció"), para
+  // cuando se vuelve aquí desde "Completa tu cuenta" con un motivo.
+  final String? errorInicial;
+  LoginScreen({super.key, this.errorInicial});
   @override State<LoginScreen> createState() => _LoginState();
 }
 class _LoginState extends State<LoginScreen> {
   final _identificador = TextEditingController();
   final _pass   = TextEditingController();
   bool _obs = true, _loading = false;
-  String? _error;
+  late String? _error = widget.errorInicial;
 
   Future<void> _login() async {
     setState(() { _loading = true; _error = null; });
     final err = await AppState.instance.login(_identificador.text.trim(), _pass.text);
     if (!mounted) return;
     if (err != null) { setState(() { _loading = false; _error = err; }); return; }
+    context.go('/home');
+  }
+
+  Future<void> _loginGoogle() async {
+    setState(() { _loading = true; _error = null; });
+    final r = await AppState.instance.loginConGoogle();
+    if (!mounted) return;
+    setState(() => _loading = false);
+    if (r.error != null) { setState(() => _error = r.error); return; }
+    // Cerró el diálogo de Google: no es un error, no se muestra nada.
+    if (r.cancelado) return;
+    // Correo nuevo: todavía NO hay sesión. Se abre "Completa tu cuenta" y la
+    // sesión se guarda recién cuando ese formulario se envía bien.
+    if (r.pendiente != null) { context.go('/completar-registro', extra: r.pendiente); return; }
     context.go('/home');
   }
 
@@ -41,7 +58,20 @@ class _LoginState extends State<LoginScreen> {
     body: SafeArea(child: SingleChildScrollView(
       padding: EdgeInsets.all(24),
       child: FadeSlideIn(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        SizedBox(height: 40),
+        // Antes esta pantalla no tenía NINGÚN botón para volver: cuando se
+        // abre con push (ej. el CTA de invitado en Home) el back físico de
+        // Android sí funcionaba por debajo, pero no había ninguna señal
+        // visual de que se podía volver. context.pop() cuando sí hay algo
+        // debajo en la pila; si no (se llegó con .go(), ej. tras cerrar
+        // sesión), no hay a dónde volver dentro del login, así que se manda
+        // a Home en su lugar — igual que ya hace OrderDetailScreen.
+        IconButton(
+          icon: Icon(Icons.arrow_back_ios_new, color: C.text, size: 20),
+          onPressed: () => context.canPop() ? context.pop() : context.go('/home'),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+        ),
+        SizedBox(height: 24),
         Center(child: Column(children: [
           Container(width: 80, height: 80, padding: EdgeInsets.all(14),
             decoration: BoxDecoration(color: C.greenBg, shape: BoxShape.circle,
@@ -64,7 +94,13 @@ class _LoginState extends State<LoginScreen> {
         SizedBox(height: 16),
         _label('Contraseña'),
         TextField(controller: _pass, obscureText: _obs, style: TextStyle(color: C.text),
-          decoration: InputDecoration(hintText: 'Mínimo 6 caracteres',
+          // El login solo compara contra el hash guardado, nunca valida
+          // formato (esa regla vigente de 10-20 caracteres/mayúscula/
+          // número/símbolo solo aplica al CREAR o CAMBIAR una contraseña,
+          // ver Registro/Recuperar) — así que ni "mínimo 6" ni ningún otro
+          // requisito pertenecen acá; una cuenta antigua con una contraseña
+          // más corta debe poder seguir entrando con normalidad.
+          decoration: InputDecoration(hintText: 'Tu contraseña',
             prefixIcon: Icon(Icons.lock_outline, color: C.textMut, size: 20),
             suffixIcon: IconButton(icon: Icon(_obs ? Icons.visibility_outlined : Icons.visibility_off_outlined, color: C.textMut, size: 20),
               onPressed: () => setState(() => _obs = !_obs)))),
@@ -79,140 +115,57 @@ class _LoginState extends State<LoginScreen> {
         ElevatedButton(onPressed: _loading ? null : _login,
           child: _loading ? SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
               : Text('Ingresar')),
-        SizedBox(height: 16),
-        Center(child: TextButton(onPressed: () => context.go('/register'),
-          child: RichText(text: TextSpan(text: '¿No tienes cuenta? ',
-            style: TextStyle(color: C.textSec, fontSize: 14),
-            children: [TextSpan(text: 'Regístrate', style: TextStyle(color: C.green, fontWeight: FontWeight.w700))])))),
+
+        // Separador "o" + botón de Google, mismo lugar y orden que ya usa
+        // la web (GoogleLogin justo debajo del submit, ver Landing.jsx).
+        SizedBox(height: 20),
+        Row(children: [
+          Expanded(child: Divider(color: C.border)),
+          Padding(padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Text('o', style: TextStyle(color: C.textMut, fontSize: 13))),
+          Expanded(child: Divider(color: C.border)),
+        ]),
+        SizedBox(height: 20),
+        OutlinedButton(
+          onPressed: _loading ? null : _loginGoogle,
+          // mainAxisSize.min + Flexible: sin ellos el texto "Continuar con
+          // Google" no podía partirse y desbordaba el botón en pantallas de
+          // 320px (o con la fuente grande de accesibilidad activada).
+          child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
+            // Sin asset propio del logo de Google en el proyecto: una "G"
+            // en su azul de marca dentro de un círculo blanco es una
+            // aproximación liviana y suficientemente reconocible, sin
+            // agregar un paquete de íconos ni una imagen nueva solo para
+            // este botón.
+            Container(width: 20, height: 20,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white,
+                border: Border.all(color: C.border)),
+              child: Center(child: Text('G',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF4285F4))))),
+            SizedBox(width: 10),
+            Flexible(child: Text('Continuar con Google', textAlign: TextAlign.center)),
+          ]),
+        ),
+
+        // Como en la web: sin pestaña de registro, esta línea es lo único que
+        // explica cómo se crea una cuenta nueva. Text centrado (no Row) para que
+        // se parta en varias líneas en pantallas de 320px sin desbordar.
+        SizedBox(height: 10),
+        Text('¿Primera vez? Entra con Google y creamos tu cuenta.',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12.5, color: C.textSec)),
+
+        // Mismo aviso y mismo lugar que en el login de la web: debajo del
+        // botón de Google. Informa el alcance de los domicilios ANTES de que
+        // el cliente arme un pedido, sin bloquear nada (el menú y la
+        // recogida en el local son para todos).
+        SizedBox(height: 20),
+        const AvisoCobertura(),
+
+        // Sin enlace de "Regístrate": el registro tradicional se eliminó (las
+        // cuentas nuevas se crean solo al entrar con Google, arriba), así que
+        // no queda ninguna pantalla a la que mandar a quien no tiene cuenta.
       ])),
     )),
-  );
-}
-
-// ── REGISTER ─────────────────────────────────────────────────
-class RegisterScreen extends StatefulWidget {
-  RegisterScreen({super.key});
-  @override State<RegisterScreen> createState() => _RegState();
-}
-class _RegState extends State<RegisterScreen> {
-  final _nombre   = TextEditingController();
-  final _correo   = TextEditingController();
-  final _tel      = TextEditingController();
-  final _doc      = TextEditingController();
-  final _dir      = TextEditingController();
-  final _pass     = TextEditingController();
-  final _confirm  = TextEditingController();
-  String _tipoDoc = tiposDoc.first;
-  String? _comuna, _error;
-  bool _obsP = true, _obsC = true, _loading = false;
-
-  Future<void> _register() async {
-    if (_pass.text != _confirm.text) { setState(() => _error = 'Las contraseñas no coinciden'); return; }
-    setState(() { _loading = true; _error = null; });
-    final err = await AppState.instance.register({
-      'nombre': _nombre.text.trim(), 'correo': _correo.text.trim(),
-      'telefono': _tel.text.trim(), 'tipoDoc': _tipoDoc,
-      'numeroDoc': _doc.text.trim(), 'departamento': 'Antioquia',
-      'municipio': 'Medellín', 'comuna': _comuna ?? '',
-      'direccion': _dir.text.trim(), 'password': _pass.text,
-    });
-    if (!mounted) return;
-    if (err != null) { setState(() { _loading = false; _error = err; }); return; }
-    // Registro exitoso → ir a verificar cuenta
-    context.go('/verificar-cuenta?correo=${Uri.encodeComponent(_correo.text.trim())}');
-  }
-
-  Widget _tf(TextEditingController c, String hint, IconData icon, {TextInputType type = TextInputType.text, bool obs = false, VoidCallback? toggle}) =>
-    TextField(controller: c, keyboardType: type, obscureText: obs, style: TextStyle(color: C.text),
-      decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: C.textMut, size: 20),
-        suffixIcon: toggle != null ? IconButton(icon: Icon(obs ? Icons.visibility_outlined : Icons.visibility_off_outlined, color: C.textMut, size: 20), onPressed: toggle) : null));
-
-  @override void dispose() {
-    for (final c in [_nombre, _correo, _tel, _doc, _dir, _pass, _confirm]) c.dispose();
-    super.dispose();
-  }
-
-  @override Widget build(BuildContext context) => Scaffold(
-    backgroundColor: C.bg,
-    appBar: AppBar(title: Text('Crear cuenta'),
-      leading: IconButton(icon: Icon(Icons.arrow_back_ios_new), onPressed: () => context.go('/login'))),
-    body: SingleChildScrollView(padding: EdgeInsets.all(20), child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start, children: [
-      if (_error != null) _err(_error!),
-
-      _label('Nombre completo *'),
-      _tf(_nombre, 'Ej: Juan Pérez', Icons.person_outline),
-      SizedBox(height: 14),
-
-      _label('Correo electrónico *'),
-      _tf(_correo, 'correo@ejemplo.com', Icons.email_outlined, type: TextInputType.emailAddress),
-      SizedBox(height: 14),
-
-      _label('Teléfono'),
-      _tf(_tel, '300 000 0000', Icons.phone_outlined, type: TextInputType.phone),
-      SizedBox(height: 14),
-
-      _label('Tipo de documento'),
-      DropdownButtonFormField<String>(
-        value: _tipoDoc, dropdownColor: C.surf2,
-        style: TextStyle(color: C.text, fontSize: 14),
-        decoration: InputDecoration(prefixIcon: Icon(Icons.badge_outlined, color: C.textMut, size: 20)),
-        items: tiposDoc.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-        onChanged: (v) => setState(() => _tipoDoc = v!)),
-      SizedBox(height: 14),
-
-      _label('Número de documento *'),
-      _tf(_doc, 'Ej: 1234567890', Icons.numbers, type: TextInputType.number),
-      SizedBox(height: 14),
-
-      Row(children: [
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _label('Departamento'),
-          Container(padding: EdgeInsets.all(14),
-            decoration: BoxDecoration(color: C.surf2, borderRadius: BorderRadius.circular(12), border: Border.all(color: C.border)),
-            child: Row(children: [Icon(Icons.map_outlined, color: C.textMut, size: 20), SizedBox(width: 12), Text('Antioquia', style: TextStyle(color: C.textMut))])),
-        ])),
-        SizedBox(width: 12),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _label('Municipio'),
-          Container(padding: EdgeInsets.all(14),
-            decoration: BoxDecoration(color: C.surf2, borderRadius: BorderRadius.circular(12), border: Border.all(color: C.border)),
-            child: Row(children: [Icon(Icons.location_city_outlined, color: C.textMut, size: 20), SizedBox(width: 12), Text('Medellín', style: TextStyle(color: C.textMut))])),
-        ])),
-      ]),
-      SizedBox(height: 14),
-
-      _label('Comuna'),
-      Text('Servicio de domicilio solo en comunas 8 y 9', style: TextStyle(fontSize: 11, color: C.textMut)),
-      SizedBox(height: 6),
-      DropdownButtonFormField<String>(
-        value: _comuna, dropdownColor: C.surf2,
-        style: TextStyle(color: C.text, fontSize: 14),
-        decoration: InputDecoration(hintText: 'Seleccionar...', prefixIcon: Icon(Icons.location_on_outlined, color: C.textMut, size: 20)),
-        items: comunasDisponibles.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
-        onChanged: (v) => setState(() => _comuna = v)),
-      if (_comuna != null)
-        Padding(padding: EdgeInsets.only(top: 6),
-          child: Row(children: [Icon(Icons.check_circle, color: C.green, size: 14), SizedBox(width: 6),
-            Text('¡Hacemos domicilios a tu zona!', style: TextStyle(color: C.green, fontSize: 12, fontWeight: FontWeight.w600))])),
-      SizedBox(height: 14),
-
-      _label('Dirección'),
-      _tf(_dir, 'Ej: Calle 10 #43-20', Icons.home_outlined),
-      SizedBox(height: 14),
-
-      _label('Contraseña *'),
-      _tf(_pass, 'Mínimo 6 caracteres', Icons.lock_outline, obs: _obsP, toggle: () => setState(() => _obsP = !_obsP)),
-      SizedBox(height: 14),
-
-      _label('Confirmar contraseña *'),
-      _tf(_confirm, 'Repite la contraseña', Icons.lock_outline, obs: _obsC, toggle: () => setState(() => _obsC = !_obsC)),
-      SizedBox(height: 28),
-
-      ElevatedButton(onPressed: _loading ? null : _register,
-        child: _loading ? SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-            : Text('Crear cuenta')),
-      SizedBox(height: 32),
-    ])),
   );
 }

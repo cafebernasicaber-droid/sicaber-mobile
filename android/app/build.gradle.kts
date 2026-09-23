@@ -15,11 +15,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.cafe_don_berna"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = maxOf(21, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -29,7 +26,22 @@ android {
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
+            //
+            // ⚠️ Login con Google (ver AppState._googleSignIn en
+            // lib/data/services/app_state.dart): la huella SHA-1 registrada
+            // hoy en Google Cloud Console es la de esta misma key de debug.
+            // El día que "release" pase a firmar con una keystore propia,
+            // hay que sacar el SHA-1 de ESA keystore y agregarlo como huella
+            // adicional al mismo cliente OAuth — si no, el login con Google
+            // fallará SOLO en los APK firmados con la keystore nueva.
             signingConfig = signingConfigs.getByName("debug")
+            // Ver proguard-rules.pro: sin este archivo, minifyReleaseWithR8
+            // fallaba (no un warning, error duro) por clases opcionales de
+            // google_mlkit_text_recognition que esta app nunca usa.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }

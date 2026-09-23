@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../core/theme/theme.dart';
+import '../../../core/utils/precios.dart';
 import '../../../data/models/models.dart';
+import '../../../data/services/api_service.dart';
 import '../../../data/services/app_state.dart';
 import '../../../data/services/data_service.dart';
+import '../../../data/services/ocr_service.dart';
+import '../../widgets/common/comprobante_view.dart';
 
 // ── MIS PEDIDOS ───────────────────────────────────────────────
 class OrdersScreen extends StatefulWidget {
@@ -81,8 +85,127 @@ class _OrderCard extends StatelessWidget {
             Text(fmt(pedido.total),
               style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: C.green)),
           ]),
+          const SizedBox(height: 4),
+          Align(alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4), minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              onPressed: () => verFactura(context, pedido),
+              icon: const Icon(Icons.receipt_long_outlined, size: 15, color: C.green),
+              label: const Text('Ver factura', style: TextStyle(fontSize: 12, color: C.green, fontWeight: FontWeight.w600)))),
         ])));
   }
+}
+
+// ── Ver factura de un pedido (productos, toppings, adiciones, precios y
+// total) — accesible desde el historial (arriba) y desde el detalle del
+// pedido (ver OrderDetailScreen).
+void verFactura(BuildContext context, Pedido pedido) => showModalBottomSheet(
+  context: context, backgroundColor: Colors.transparent, isScrollControlled: true,
+  builder: (_) => _FacturaSheet(pedido: pedido));
+
+String _labelMetodoPago(String raw) {
+  if (raw.isEmpty) return '—';
+  final cap = raw[0].toUpperCase() + raw.substring(1).toLowerCase();
+  return metodosPagoLabels[cap] ?? cap;
+}
+
+class _FacturaSheet extends StatelessWidget {
+  final Pedido pedido;
+  const _FacturaSheet({required this.pedido});
+
+  @override Widget build(BuildContext context) => DraggableScrollableSheet(
+    initialChildSize: 0.75, minChildSize: 0.4, maxChildSize: 0.95, expand: false,
+    builder: (context, scrollCtrl) => Container(
+      decoration: BoxDecoration(color: C.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+      child: ListView(controller: scrollCtrl, padding: const EdgeInsets.all(20), children: [
+        Center(child: Container(width: 36, height: 4, margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(color: C.border, borderRadius: BorderRadius.circular(100)))),
+
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Factura', style: TextStyle(fontSize: 11, color: C.textMut, letterSpacing: 0.5)),
+            Text(pedido.id, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: C.text)),
+          ]),
+          if (pedido.fecha.isNotEmpty) Text(pedido.fecha, style: TextStyle(fontSize: 12, color: C.textMut)),
+        ]),
+        const SizedBox(height: 18),
+
+        Text('Productos', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text)),
+        const SizedBox(height: 10),
+        for (final item in pedido.items)
+          Container(margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: C.card, borderRadius: BorderRadius.circular(12), border: Border.all(color: C.border)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(child: Text('${item.cantidad}× ${item.producto.nombre}',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text))),
+                Text(fmt(item.precioUnitario), style: TextStyle(fontSize: 13, color: C.textSec)),
+              ]),
+              if (item.toppings.isNotEmpty || item.adiciones.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                for (final t in item.toppings) _lineaExtra(t.nombre, t.gratuito ? 0 : t.precio),
+                for (final a in item.adiciones) _lineaExtra(a.nombre, a.precio),
+              ],
+              Divider(height: 18, color: C.border),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Text('Subtotal', style: TextStyle(fontSize: 12, color: C.textMut)),
+                Text(fmt(item.subtotal), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: C.text)),
+              ]),
+            ])),
+
+        const SizedBox(height: 10),
+        _rowDetalle('Método de pago', _labelMetodoPago(pedido.metodoPago)),
+        _rowDetalle('Entrega', pedido.tipoEntrega == 'domicilio' ? 'A domicilio' : 'Recoger en el local'),
+        if (pedido.direccionEntrega != null && pedido.direccionEntrega!.isNotEmpty)
+          _rowDetalle('Dirección', pedido.direccionEntrega!),
+        if (pedido.notas != null && pedido.notas!.isNotEmpty)
+          _rowDetalle('Notas', pedido.notas!),
+
+        const SizedBox(height: 12),
+        Divider(color: C.border),
+        // Desglose subtotal / impuesto / total. El impuesto va INCLUIDO en
+        // los precios del catálogo, así que acá se SEPARA, no se suma: el
+        // total sigue siendo exactamente el que el backend usó para
+        // validar el pago (ver core/utils/precios.dart).
+        _desgloseFactura(),
+        const SizedBox(height: 24),
+      ]),
+    ),
+  );
+
+  Widget _desgloseFactura() {
+    final d = DesglosePrecio.deTotalConIva(pedido.total);
+    return Column(children: [
+      if (d.aplica) ...[
+        _rowDetalle('Subtotal', fmt(d.base)),
+        _rowDetalle(etiquetaImpuesto, fmt(d.impuesto)),
+        const SizedBox(height: 4),
+      ],
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('Total', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: C.text)),
+        Text(fmt(d.total), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: C.green)),
+      ]),
+      if (d.aplica)
+        Align(alignment: Alignment.centerRight,
+          child: Text('IVA incluido en el precio', style: TextStyle(fontSize: 10.5, color: C.textMut))),
+    ]);
+  }
+
+  Widget _lineaExtra(String nombre, double precio) => Padding(padding: const EdgeInsets.only(top: 2),
+    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Expanded(child: Text('+ $nombre', style: TextStyle(fontSize: 12, color: C.textMut))),
+      if (precio > 0) Text(fmt(precio), style: TextStyle(fontSize: 12, color: C.textMut)),
+    ]));
+
+  Widget _rowDetalle(String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(k, style: TextStyle(fontSize: 12, color: C.textMut)),
+      const SizedBox(width: 12),
+      Expanded(child: Text(v, textAlign: TextAlign.right,
+        style: TextStyle(fontSize: 13, color: C.text, fontWeight: FontWeight.w600))),
+    ]));
 }
 
 
@@ -137,23 +260,55 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       context: context,
       builder: (_) => _DevolucionDialog(pedido: p));
     if (enviado == true && mounted) {
+      // El pedido ya viene refrescado desde AppState.solicitarDevolucion —
+      // antes la solicitud se registraba en el backend pero la pantalla
+      // seguía mostrando el pedido igual que antes, así que el cliente no
+      // tenía ninguna señal de que su solicitud existiera.
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Solicitud de devolución enviada ✓'), backgroundColor: C.green));
+        content: Text('Solicitud de devolución enviada. Un cajero la revisará.'),
+        backgroundColor: C.green, duration: Duration(seconds: 5)));
     }
   }
 
+  // Sube un comprobante NUEVO a un pedido cuyo comprobante fue rechazado.
+  // Pasa por el mismo camino que el checkout: se lee con OCR, se manda el
+  // texto al backend y es el BACKEND quien decide si sirve — si el valor no
+  // corresponde al total, el reenvío falla y se le pide otro al cliente.
   Future<void> _reenviarComprobante() async {
     try {
-      final archivo = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 70);
+      final archivo = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
       if (archivo == null) return;
       final bytes = await archivo.readAsBytes();
       if (!mounted) return;
       setState(() => _reenviando = true);
+
+      // Lectura local del comprobante (ver services/ocr_service.dart). Si
+      // no se puede leer, se manda igual sin texto: el backend lo deja en
+      // revisión manual en vez de rechazarlo.
+      final ocr = await OcrService.instance.leerTexto(archivo.path);
       final comprobanteBase64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-      await AppState.instance.reenviarComprobante(widget.id, comprobanteBase64);
+      await AppState.instance.reenviarComprobante(
+        widget.id, comprobanteBase64, comprobanteTexto: ocr.texto);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Comprobante reenviado, en revisión ✓'), backgroundColor: C.green));
+
+      // El estado real lo pone el backend; se lee del pedido ya refrescado
+      // en vez de anunciar un resultado que puede no ser el que ocurrió.
+      final p = AppState.instance.pedidos.firstWhere((x) => x.id == widget.id,
+        orElse: () => Pedido(id: widget.id, estado: '?', fecha: '', metodoPago: '', items: [], total: 0));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(p.comprobanteVerificado
+          ? 'Comprobante verificado ✓'
+          : 'Comprobante enviado. Un cajero lo revisará.'),
+        backgroundColor: C.green));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      // Rechazo del backend (valor que no coincide, comprobante ya usado en
+      // otro pedido): mensaje concreto y la puerta abierta a subir otro.
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message), backgroundColor: C.red,
+        duration: const Duration(seconds: 7),
+        action: SnackBarAction(label: 'Subir otro', textColor: Colors.white,
+          onPressed: _reenviarComprobante)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -170,7 +325,21 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         orElse: () => Pedido(id: widget.id, estado: '?', fecha: '', metodoPago: '', items: [], total: 0));
 
       return Scaffold(backgroundColor: C.bg,
-        appBar: AppBar(title: Text(p.id), backgroundColor: C.surface),
+        // ── "Regresar" SIEMPRE disponible (requisito 8) ──────────────
+        // Esta pantalla se abre al terminar una compra y, tal como estaba,
+        // el cliente quedaba atrapado: el checkout navegaba con context.go,
+        // que REEMPLAZA la pila entera, así que no había nada que "popear",
+        // la ruta vive fuera del ShellRoute (sin barra inferior) y el gesto
+        // de atrás del sistema tampoco llevaba a ningún lado.
+        // Ahora hay un botón explícito que vuelve a la pantalla anterior si
+        // la hay, y si no, a "Mis pedidos" — nunca a un callejón sin salida.
+        appBar: AppBar(
+          title: Text(p.id),
+          backgroundColor: C.surface,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Regresar',
+            onPressed: () => context.canPop() ? context.pop() : context.go('/pedidos'))),
         body: RefreshIndicator(
           color: C.green,
           onRefresh: () => AppState.instance.refrescarPedido(widget.id),
@@ -208,27 +377,50 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text)),
               ]))),
 
+            // ── Comprobante de pago ───────────────────────────────
+            // Requisito 6: si el pedido tiene comprobante, se puede ver
+            // desde acá, expandir y volver a reducir. Antes no se mostraba
+            // en absoluto en esta pantalla — y aunque se hubiera mostrado,
+            // no se habría visto: la app sube el comprobante como data URL
+            // en base64 y todo el código lo cargaba con Image.network, que
+            // no sabe leer ese formato (ver comprobante_view.dart).
+            if (p.tieneComprobante && p.comprobanteImgUrl != null)
+              ComprobanteVisor(
+                fuente: p.comprobanteImgUrl!,
+                estadoTexto: _textoEstadoComprobante(p),
+                estadoColor: _colorEstadoComprobante(p)),
+
             // ── Detalles ──
-            _row(Icons.payments_outlined, 'Método de pago', p.metodoPago),
+            const SizedBox(height: 16),
+            _row(Icons.payments_outlined, 'Método de pago', _labelMetodoPago(p.metodoPago)),
             if (p.notas != null && p.notas!.isNotEmpty) ...[
               const SizedBox(height: 8),
               _row(Icons.notes_outlined, 'Notas', p.notas!)],
 
             const SizedBox(height: 16),
             Divider(color: C.border),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text('Total', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: C.text)),
-              Text(fmt(p.total), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: C.green))]),
+            // Mismo desglose que el carrito, el checkout y la factura — el
+            // total es idéntico al que el backend usó para validar el pago.
+            _desgloseDetalle(p.total),
 
             // ── Acciones ── (botones sueltos: directo en el Column, no en
             // un Row, para no chocar con el minimumSize de ancho infinito
             // que el tema le da a ElevatedButton/OutlinedButton).
             const SizedBox(height: 24),
             OutlinedButton.icon(
+              onPressed: () => verFactura(context, p),
+              icon: const Icon(Icons.receipt_long_outlined, size: 18),
+              label: const Text('Ver factura')),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
               onPressed: () => _repetirPedido(p),
               icon: const Icon(Icons.replay, size: 18),
               label: const Text('Repetir pedido')),
-            if (p.estado == 'entregado') ...[
+            // Solo tiene sentido ofrecer la devolución si queda algo por
+            // devolver: antes se ofrecía siempre en un pedido entregado,
+            // incluso cuando ya se había devuelto todo, y la solicitud
+            // terminaba rechazada por el backend con un error confuso.
+            if (p.estado == 'entregado' && p.itemsDevolvibles.isNotEmpty) ...[
               const SizedBox(height: 10),
               OutlinedButton.icon(
                 onPressed: () => _solicitarDevolucion(p),
@@ -236,6 +428,16 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 icon: const Icon(Icons.assignment_return_outlined, size: 18),
                 label: const Text('Solicitar devolución')),
             ],
+
+            // ── Botón de regreso también al final ─────────────────
+            // El de la barra superior queda lejos del pulgar tras hacer
+            // scroll por todo el detalle; después de una compra este es el
+            // que el cliente encuentra primero.
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: () => context.canPop() ? context.pop() : context.go('/pedidos'),
+              icon: const Icon(Icons.arrow_back, size: 18),
+              label: const Text('Regresar')),
 
             const SizedBox(height: 40),
           ])),
@@ -249,6 +451,55 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       Text(k, style: TextStyle(fontSize: 11, color: C.textMut)),
       Text(v, style: TextStyle(fontSize: 14, color: C.text, fontWeight: FontWeight.w500))])),
   ]);
+
+  Widget _desgloseDetalle(double total) {
+    final d = DesglosePrecio.deTotalConIva(total);
+    Widget fila(String k, String v, {bool fuerte = false}) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(k, style: TextStyle(fontSize: fuerte ? 16 : 13,
+          fontWeight: fuerte ? FontWeight.w700 : FontWeight.w500,
+          color: fuerte ? C.text : C.textSec)),
+        Text(v, style: TextStyle(fontSize: fuerte ? 20 : 13,
+          fontWeight: fuerte ? FontWeight.w900 : FontWeight.w600,
+          color: fuerte ? C.green : C.text)),
+      ]));
+    return Column(children: [
+      if (d.aplica) ...[
+        fila('Subtotal', fmt(d.base)),
+        fila(etiquetaImpuesto, fmt(d.impuesto)),
+        const SizedBox(height: 4),
+      ],
+      fila('Total', fmt(d.total), fuerte: true),
+      if (d.aplica)
+        Align(alignment: Alignment.centerRight,
+          child: Text('IVA incluido en el precio', style: TextStyle(fontSize: 10.5, color: C.textMut))),
+    ]);
+  }
+
+  // Texto que acompaña al visor del comprobante: sale del VEREDICTO del
+  // backend (columna comprobante_validacion), no de una suposición local.
+  String? _textoEstadoComprobante(Pedido p) {
+    if (p.pagoRechazado) return 'Rechazado — sube un comprobante nuevo';
+    if (p.comprobanteVerificado) {
+      final valor = p.comprobanteValor;
+      return valor != null ? 'Verificado por ${fmt(valor)}' : 'Verificado';
+    }
+    if (p.comprobanteValorNoCoincide) {
+      final valor = p.comprobanteValor;
+      return valor != null
+        ? 'El comprobante es por ${fmt(valor)} y el pedido es de ${fmt(p.total)}'
+        : 'El valor no corresponde al pedido';
+    }
+    if (p.pagoAprobado) return 'Pago confirmado';
+    return 'En revisión por un cajero';
+  }
+
+  Color? _colorEstadoComprobante(Pedido p) {
+    if (p.pagoRechazado || p.comprobanteValorNoCoincide) return C.red;
+    if (p.comprobanteVerificado || p.pagoAprobado) return C.green;
+    return C.textSec;
+  }
 }
 
 // ── Formulario "Solicitar devolución" ──────────────────────────
@@ -258,6 +509,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 // devolver (puede ser más de uno), pero escribe un solo motivo para toda
 // la solicitud — ver AppState.solicitarDevolucion.
 const _kMaxPalabrasMotivo = 20;
+// Mismo mínimo que valida el backend (LIMITES.MOTIVO_MINIMO en
+// sicaber-back/src/config/validaciones.js). Duplicarlo acá no es
+// redundante: evita un viaje de ida y vuelta para descubrir algo que se
+// sabe antes de salir.
+const _kMinCaracteresMotivo = 10;
 
 int _contarPalabras(String s) => s.trim().isEmpty ? 0 : s.trim().split(RegExp(r'\s+')).length;
 
@@ -282,10 +538,14 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
   int     _palabras = 0;
   final Set<CartItem> _seleccionados = {};
 
+  // Solo las líneas con unidades sin devolver: pedir de nuevo algo ya
+  // devuelto lo rechaza el backend ("excede lo comprado en el pedido").
+  List<CartItem> get _devolvibles => widget.pedido.itemsDevolvibles;
+
   @override void initState() {
     super.initState();
     // Un solo producto en el pedido: se preselecciona, no hace falta marcarlo.
-    if (widget.pedido.items.length == 1) _seleccionados.add(widget.pedido.items.first);
+    if (_devolvibles.length == 1) _seleccionados.add(_devolvibles.first);
     _motivoCtrl.addListener(_onMotivoChanged);
   }
 
@@ -319,6 +579,14 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
       setState(() => _error = 'Cuéntanos por qué quieres la devolución');
       return;
     }
+    // MISMO mínimo que exige el backend (LIMITES.MOTIVO_MINIMO = 10). Sin
+    // esta validación local, un motivo de 4 letras se mandaba, el servidor
+    // lo rechazaba y el cliente veía un error después de esperar la subida
+    // — cuando se podía avisar al instante.
+    if (motivo.length < _kMinCaracteresMotivo) {
+      setState(() => _error = 'Explícanos un poco más (mínimo $_kMinCaracteresMotivo caracteres).');
+      return;
+    }
     setState(() { _enviando = true; _error = null; });
     final err = await AppState.instance.solicitarDevolucion(widget.pedido.id, motivo, _seleccionados.toList());
     if (!mounted) return;
@@ -330,7 +598,7 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
   }
 
   @override Widget build(BuildContext context) {
-    final items = widget.pedido.items;
+    final items = _devolvibles;
     return AlertDialog(
       backgroundColor: C.card,
       title: const Text('Solicitar devolución'),
@@ -354,7 +622,8 @@ class _DevolucionDialogState extends State<_DevolucionDialog> {
           decoration: const InputDecoration(hintText: 'Cuéntanos qué pasó...')),
         const SizedBox(height: 4),
         Align(alignment: Alignment.centerRight,
-          child: Text('$_palabras/$_kMaxPalabrasMotivo palabras',
+          child: Text(
+            '${_motivoCtrl.text.trim().length}/$_kMinCaracteresMotivo caracteres mín. · $_palabras/$_kMaxPalabrasMotivo palabras',
             style: TextStyle(fontSize: 11,
               color: _palabras >= _kMaxPalabrasMotivo ? C.red : C.textMut))),
         if (_error != null) Padding(padding: const EdgeInsets.only(top: 8),
@@ -434,6 +703,8 @@ class _EntregaYTimeline extends StatelessWidget {
 
         if (pedido.esCancelado)
           _CanceladoBanner(pedido: pedido, reenviando: reenviando, onReenviar: onReenviarComprobante)
+        else if (pedido.esDevuelto)
+          const _DevueltoBanner()
         else
           _EstadoStepper(pedido: pedido),
       ]));
@@ -555,6 +826,31 @@ class _CanceladoBanner extends StatelessWidget {
               : const Icon(Icons.cloud_upload_outlined, size: 18),
             label: Text(reenviando ? 'Subiendo...' : 'Subir nuevo comprobante')),
         ],
+      ]));
+  }
+}
+
+// ── Estado especial "devuelto", fuera de la secuencia normal ──────
+// Se pone cuando el staff aprueba una devolución que el cliente solicitó
+// (ver "Solicitar devolución" más abajo) — consume el mismo campo `estado`
+// del pedido que ya expone el backend, ver Pedido.esDevuelto.
+class _DevueltoBanner extends StatelessWidget {
+  const _DevueltoBanner();
+
+  @override Widget build(BuildContext context) {
+    final naranja = Color(Pedido.coloresEstado['devuelto']!);
+    return Container(padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: naranja.withOpacity(0.08), borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: naranja.withOpacity(0.3))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.assignment_return_outlined, color: naranja, size: 20),
+          const SizedBox(width: 8),
+          Text('Pedido devuelto', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: naranja)),
+        ]),
+        const SizedBox(height: 8),
+        Text('Tu solicitud de devolución fue aprobada. Si tienes dudas sobre el reembolso, contáctanos.',
+          style: TextStyle(fontSize: 13, color: C.textSec)),
       ]));
   }
 }

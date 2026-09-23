@@ -4,7 +4,7 @@ import '../../../core/theme/theme.dart';
 import '../../../data/services/app_state.dart';
 
 /// Verifica si el usuario está autenticado. Si NO lo está, muestra una
-/// alerta invitándolo a iniciar sesión o registrarse, y retorna `false`.
+/// alerta invitándolo a iniciar sesión, y retorna `false`.
 /// Si SÍ está autenticado, retorna `true` de inmediato sin mostrar nada.
 ///
 /// Uso típico antes de una acción que requiere sesión (ej: agregar al carrito):
@@ -48,16 +48,8 @@ bool ensureLoggedIn(BuildContext context, {String accion = 'agregar productos al
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white)),
           )),
           const SizedBox(height: 10),
-          SizedBox(width: double.infinity, child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              side: BorderSide(color: C.border),
-              padding: const EdgeInsets.symmetric(vertical: 13),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            onPressed: () { Navigator.pop(ctx); context.push('/register'); },
-            child: Text('Crear cuenta',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: C.text)),
-          )),
+          // Sin botón "Crear cuenta": ya no hay pantalla de registro; quien no
+          // tiene cuenta la crea al entrar con Google desde el login.
           const SizedBox(height: 10),
           TextButton(
             onPressed: () => Navigator.pop(ctx),

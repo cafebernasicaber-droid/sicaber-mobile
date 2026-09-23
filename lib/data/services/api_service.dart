@@ -1,25 +1,35 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'dart:io' show Platform;
+
 // ── CONFIGURACIÓN DE LA API ───────────────────────────────────
-// Cambia esta URL según tu entorno:
-// - Android emulador: 'http://10.0.2.2:4000/api'
-// - Dispositivo físico en la misma red: 'http://192.168.X.X:4000/api'
-// - Producción: 'https://tu-dominio.com/api'
-String get _baseUrl {
-  if (kIsWeb) {
-    return 'http://localhost:4000/api';
-  } else if (Platform.isAndroid) {
-    return 'http://10.0.2.2:4000/api'; // emulador Android
-  } else {
-    return 'http://localhost:4000/api'; // iOS simulator / desktop
-  }
-}
+// Apunta al backend desplegado en Render, que funciona igual en web,
+// Android, iOS y escritorio. Antes cada plataforma tenía su propia URL a
+// localhost (10.0.2.2 para el emulador, localhost para el resto), así que
+// la app solo servía con el backend corriendo en la misma máquina — y al
+// moverlo a Render dejó de conectar por completo.
+//
+// Para desarrollar contra un backend local NO hay que editar este archivo:
+// se pasa la URL al ejecutar.
+//   flutter run --dart-define=API_URL=http://localhost:4000/api
+//   flutter run --dart-define=API_URL=http://10.0.2.2:4000/api
+//
+// Ese 10.0.2.2 es para el emulador de Android: ahí "localhost" es el
+// propio emulador, no el PC — 10.0.2.2 es la dirección con la que el
+// emulador ve la máquina anfitriona.
+//
+// Nota: Render suspende el servicio gratuito tras 15 minutos sin tráfico.
+// La primera petición después de eso puede tardar 30-50 segundos.
+const String _apiUrlPorDefecto = 'https://sicaber-back.onrender.com/api';
+
+String get _baseUrl => const String.fromEnvironment(
+      'API_URL',
+      defaultValue: _apiUrlPorDefecto,
+    );
 
 // Igual que _baseUrl pero sin el sufijo /api, porque las imágenes se
-// sirven como archivos estáticos (ej: http://localhost:4000/uploads/foto.jpg)
+// sirven como archivos estáticos (ej: https://…/uploads/foto.jpg)
 String get _mediaBaseUrl => _baseUrl.replaceAll('/api', '');
 
 /// Convierte lo que venga en el campo `imagen` del backend (puede ser una
@@ -34,6 +44,28 @@ String? buildImageUrl(String? imagen) {
   final ruta = imagen.startsWith('/') ? imagen : '/$imagen';
   return '$_mediaBaseUrl$ruta';
 }
+
+// ── TIEMPOS MÁXIMOS DE ESPERA ─────────────────────────────────
+// CAUSA RAÍZ de las "pantallas de carga indefinidas": ninguna petición
+// tenía timeout. El paquete http de Dart, sin un .timeout() explícito,
+// espera para siempre — si el servidor acepta la conexión y no contesta
+// (Render suspende el plan gratuito y la primera petición puede quedarse
+// colgada, o el celular pierde la red a mitad de una subida), el Future
+// nunca se completa y el spinner de la pantalla gira sin fin, sin error
+// que mostrar y sin forma de reintentar.
+//
+// Son tres valores distintos a propósito: subir un comprobante en base64
+// es muchísimo más pesado que pedir el menú, y usar el mismo número para
+// los dos obligaría a poner un timeout larguísimo en todo.
+const Duration _timeoutLectura  = Duration(seconds: 20);
+const Duration _timeoutEscritura = Duration(seconds: 30);
+const Duration _timeoutSubida   = Duration(seconds: 90);
+
+// El plan gratuito de Render apaga el servicio tras 15 minutos sin
+// tráfico y tarda ~30-50 s en despertar. Un solo intento con timeout corto
+// lo daría por caído siempre que el cliente sea el primero en entrar en un
+// rato, así que las lecturas se reintentan una vez.
+const int _reintentosLectura = 1;
 
 class ApiService {
   ApiService._();
@@ -51,30 +83,90 @@ class ApiService {
     if (_token != null) 'Authorization': 'Bearer $_token',
   };
 
-  // ── GET ───────────────────────────────────────────────────
-  Future<dynamic> get(String path) async {
-    final res = await http.get(Uri.parse('$_baseUrl$path'), headers: _headers);
-    return _parse(res);
+  // Envuelve cualquier petición con su timeout y traduce los fallos de red
+  // a un ApiException con mensaje entendible. Sin esto, un corte de red
+  // llegaba a la UI como un SocketException crudo con texto en inglés.
+  Future<dynamic> _enviar(
+    Future<http.Response> Function() peticion, {
+    required Duration timeout,
+    int reintentos = 0,
+  }) async {
+    for (var intento = 0; ; intento++) {
+      try {
+        final res = await peticion().timeout(timeout);
+        return _parse(res);
+      } on ApiException {
+        // Error de negocio (4xx/5xx con cuerpo): se propaga tal cual, no
+        // se reintenta — la respuesta sería idéntica.
+        rethrow;
+      } on TimeoutException {
+        if (intento < reintentos) continue;
+        throw ApiException(
+          'El servidor está tardando demasiado en responder. Revisa tu conexión e intenta de nuevo.',
+          statusCode: 0, esDeRed: true);
+      } catch (e) {
+        if (intento < reintentos) continue;
+        throw ApiException(
+          'No pudimos conectarnos con el servidor. Revisa tu conexión a internet.',
+          statusCode: 0, esDeRed: true);
+      }
+    }
   }
+
+  // ── GET ───────────────────────────────────────────────────
+  Future<dynamic> get(String path, {Duration? timeout}) => _enviar(
+    () => http.get(Uri.parse('$_baseUrl$path'), headers: _headers),
+    timeout: timeout ?? _timeoutLectura,
+    reintentos: _reintentosLectura,
+  );
 
   // ── POST ──────────────────────────────────────────────────
-  Future<dynamic> post(String path, Map<String, dynamic> body) async {
-    final res = await http.post(Uri.parse('$_baseUrl$path'),
-      headers: _headers, body: jsonEncode(body));
-    return _parse(res);
-  }
+  // `subida: true` para los cuerpos que llevan una imagen en base64 (crear
+  // un pedido con comprobante): necesitan mucho más tiempo que una
+  // petición normal.
+  Future<dynamic> post(String path, Map<String, dynamic> body, {bool subida = false, Duration? timeout}) => _enviar(
+    () => http.post(Uri.parse('$_baseUrl$path'), headers: _headers, body: jsonEncode(body)),
+    timeout: timeout ?? (subida ? _timeoutSubida : _timeoutEscritura),
+  );
 
   // ── PUT ───────────────────────────────────────────────────
-  Future<dynamic> put(String path, Map<String, dynamic> body) async {
-    final res = await http.put(Uri.parse('$_baseUrl$path'),
-      headers: _headers, body: jsonEncode(body));
-    return _parse(res);
-  }
+  Future<dynamic> put(String path, Map<String, dynamic> body, {bool subida = false, Duration? timeout}) => _enviar(
+    () => http.put(Uri.parse('$_baseUrl$path'), headers: _headers, body: jsonEncode(body)),
+    timeout: timeout ?? (subida ? _timeoutSubida : _timeoutEscritura),
+  );
+
+  // ── PATCH ─────────────────────────────────────────────────
+  // No existía. El backend expone varias rutas que solo aceptan PATCH
+  // (estado de un pedido, aprobar/rechazar comprobante, estado de una
+  // devolución); sin este método no había forma de llamarlas desde la app.
+  Future<dynamic> patch(String path, Map<String, dynamic> body, {Duration? timeout}) => _enviar(
+    () => http.patch(Uri.parse('$_baseUrl$path'), headers: _headers, body: jsonEncode(body)),
+    timeout: timeout ?? _timeoutEscritura,
+  );
 
   dynamic _parse(http.Response res) {
-    final data = jsonDecode(utf8.decode(res.bodyBytes));
+    final cuerpo = utf8.decode(res.bodyBytes);
+    dynamic data;
+    try {
+      data = cuerpo.isEmpty ? null : jsonDecode(cuerpo);
+    } catch (_) {
+      // El servidor contestó algo que no es JSON: una página de error del
+      // hosting, un portal cautivo del wifi, un HTML de "servicio
+      // suspendido". Antes esto reventaba con un FormatException críptico
+      // dentro del jsonDecode, ANTES de poder mirar siquiera el código de
+      // estado.
+      throw ApiException(
+        res.statusCode >= 400
+          ? 'El servidor respondió con un error (${res.statusCode}).'
+          : 'El servidor respondió algo inesperado. Intenta de nuevo.',
+        statusCode: res.statusCode);
+    }
     if (res.statusCode >= 400) {
-      throw ApiException(data['error'] ?? 'Error ${res.statusCode}');
+      final mapa = data is Map<String, dynamic> ? data : null;
+      throw ApiException(
+        (mapa?['error'] as String?) ?? 'Error ${res.statusCode}',
+        statusCode: res.statusCode,
+        data: mapa);
     }
     return data;
   }
@@ -82,7 +174,24 @@ class ApiService {
 
 class ApiException implements Exception {
   final String message;
-  ApiException(this.message);
+  // statusCode/data — antes ApiException solo cargaba el mensaje. Hacen
+  // falta para distinguir respuestas de error que traen más que un texto
+  // (ej. POST /pedidos con dirección a domicilio: 409 +
+  // {motivo:'no_geocodificada', requiereSeleccionManual:true} pide elegir
+  // el local más cercano a mano, mientras que 400 es un rechazo firme por
+  // estar fuera de comuna 8/9 — ver AppState.crearPedido/cart.dart).
+  final int statusCode;
+  final Map<String, dynamic>? data;
+  // true cuando el fallo fue de RED (sin internet, timeout), no una
+  // respuesta del servidor. La UI lo usa para ofrecer "Reintentar" en vez
+  // de mostrar el error como si el pedido se hubiera rechazado.
+  final bool esDeRed;
+  ApiException(this.message, {this.statusCode = 0, this.data, this.esDeRed = false});
+
+  // Clave estable que manda el backend para distinguir el caso concreto
+  // (ej. 'valor_no_coincide', 'comprobante_repetido', 'no_geocodificada').
+  String? get motivo => data?['motivo'] as String?;
+
   @override String toString() => message;
 }
 
@@ -160,6 +269,18 @@ extension LocalFromJson on Local {
   );
 }
 
+// METODO_PAGO_COLS en el backend ya devuelve "urlQr" en camelCase (alias
+// de la columna url_qr) — mismo patrón que el resto de columnas snake_case
+// que se alían al traerlas (ver clienteCols.js).
+extension MetodoPagoFromJson on MetodoPago {
+  static MetodoPago fromJson(Map<String, dynamic> j) => MetodoPago(
+    id:          j['id'] as int,
+    nombre:      j['nombre'] as String,
+    descripcion: j['descripcion'] as String?,
+    urlQr:       j['urlQr'] as String?,
+  );
+}
+
 extension ComboFromJson on Combo {
   // Acepta las dos formas que se han visto en el backend: un solo campo
   // "items" (jsonb unificado), o "productos"/"adiciones" por separado
@@ -234,11 +355,31 @@ class PedidoSync {
   final String  fecha;
   final bool    tieneComprobante;
   final String? comprobanteImgUrl;
+  // Campos que el backend ya devolvía (o devuelve desde la corrección de
+  // esta ronda) y que la app simplemente no estaba leyendo.
+  final String? estadoPago;
+  final Map<String, dynamic>? comprobanteValidacion;
+  final String? estadoDevolucion;
 
   const PedidoSync({
     required this.backendId, required this.estado, required this.fecha,
     this.tieneComprobante = false, this.comprobanteImgUrl,
+    this.estadoPago, this.comprobanteValidacion, this.estadoDevolucion,
   });
+
+  // comprobante_validacion es una columna JSONB: node-pg normalmente la
+  // entrega ya parseada, pero se acepta también el texto crudo — mismo
+  // patrón defensivo que ComboFromJson usa con "items".
+  static Map<String, dynamic>? _parseMapa(dynamic raw) {
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final d = jsonDecode(raw);
+        if (d is Map) return Map<String, dynamic>.from(d);
+      } catch (_) {}
+    }
+    return null;
+  }
 
   factory PedidoSync.fromJson(Map<String, dynamic> j) => PedidoSync(
     backendId: j['id'] as int,
@@ -251,8 +392,17 @@ class PedidoSync {
     // archivo / "Enviado por WhatsApp" / etc.); la imagen real que revisa
     // el cajero vive en "comprobante_img" — es esa la que determina si
     // hay algo que verificar.
-    tieneComprobante: j['comprobante_img'] != null,
-    comprobanteImgUrl: buildImageUrl(j['comprobante_img'] as String?),
+    tieneComprobante: j['comprobante_img'] != null || j['comprobanteImg'] != null,
+    // OJO: aquí NO se usa buildImageUrl. El comprobante que sube la app es
+    // una data URL en base64, y buildImageUrl la devolvía intacta para que
+    // después Image.network intentara descargarla como si fuera una
+    // dirección web — por eso el comprobante nunca se veía. Se guarda la
+    // fuente TAL CUAL y es ComprobanteImage quien decide cómo pintarla
+    // (ver widgets/common/comprobante_view.dart).
+    comprobanteImgUrl: (j['comprobante_img'] ?? j['comprobanteImg']) as String?,
+    estadoPago: j['estado_pago'] as String?,
+    comprobanteValidacion: _parseMapa(j['comprobanteValidacion'] ?? j['comprobante_validacion']),
+    estadoDevolucion: j['estado_devolucion'] as String?,
   );
 }
 
@@ -312,6 +462,16 @@ extension PedidoFromJson on Pedido {
         producto: producto,
         cantidad: cantidad == 0 ? 1 : cantidad,
         toppings: toppings, adiciones: adiciones,
+        // La POSICIÓN de la línea dentro del pedido. El backend arma
+        // "productos" en el mismo orden que `pedidos.items`, así que el
+        // índice de este map es exactamente el item_index que espera
+        // POST /devoluciones — y es lo único que identifica sin ambigüedad
+        // una línea (un combo no tiene producto_id, y el mismo producto
+        // puede aparecer dos veces con toppings distintos).
+        itemIndex: entry.key,
+        // Lo ya devuelto y aprobado de esta línea (lo calcula
+        // conEstadoDevolucion en el backend).
+        cantidadDevuelta: _asId(p['cantidadDevuelta']),
       );
     }).toList();
 
@@ -321,7 +481,11 @@ extension PedidoFromJson on Pedido {
       fecha: sync.fecha,
       metodoPago: j['pago'] as String? ?? '',
       items: items,
-      total: parseNum(j['total']),
+      // El total que manda el backend es el que ÉL calculó y contra el que
+      // valida el comprobante (total_calculado cuando pudo reconstruir el
+      // carrito, si no el total guardado) — nunca se recalcula en la app,
+      // justo para que los dos números no puedan separarse.
+      total: parseNum(j['totalCalculado'] ?? j['total_calculado'] ?? j['total']),
       // El backend todavía no tiene columna "notas" en la tabla pedidos —
       // no hay de dónde traerlas para pedidos históricos.
       notas: null,
@@ -330,6 +494,9 @@ extension PedidoFromJson on Pedido {
       backendId: sync.backendId,
       tieneComprobante: sync.tieneComprobante,
       comprobanteImgUrl: sync.comprobanteImgUrl,
+      estadoPago: sync.estadoPago,
+      comprobanteValidacion: sync.comprobanteValidacion,
+      estadoDevolucion: sync.estadoDevolucion,
     );
   }
 }

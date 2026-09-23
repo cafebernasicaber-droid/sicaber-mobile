@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Sin este permiso la app no puede hacer NINGUNA petición de red: el
+         APK compila igual y la app abre, pero toda llamada a la API falla en
+         el dispositivo. Hace falta porque el backend ya no corre en la misma
+         máquina, sino en Render (https://sicaber-back.onrender.com).
+         Al ser HTTPS no se necesita usesCleartextTraffic. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
-        android:label="cafe_don_berna"
+        android:label="Café Don Berna"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

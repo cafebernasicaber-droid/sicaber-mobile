@@ -1,8 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/theme/theme.dart';
 import '../../../data/services/app_state.dart';
 import '../../../data/services/data_service.dart';
+
+// ── Contáctanos por WhatsApp ─────────────────────────────────
+// Canal de soporte GENERAL (dudas, reclamos, lo que sea) — a diferencia
+// del comprobante de pago, que ahora se sube SIEMPRE dentro de la app (ver
+// checkout.dart), esto no tiene nada que ver con comprobantes.
+Future<void> _contactarWhatsapp(BuildContext context) async {
+  final url = whatsappUrl('Hola, tengo una consulta sobre Café Don Berna.');
+  bool abierto = false;
+  try {
+    abierto = await launchUrl(url, mode: LaunchMode.externalApplication);
+  } catch (_) {
+    abierto = false;
+  }
+  if (!context.mounted) return;
+  if (!abierto) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('No se pudo abrir WhatsApp. ¿Tienes la app instalada?'), backgroundColor: C.red));
+  }
+}
 
 // ── PERFIL ────────────────────────────────────────────────────
 class ProfileScreen extends StatefulWidget {
@@ -49,13 +69,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Text(u.correo, style: TextStyle(fontSize: 14, color: C.textSec)),
           const SizedBox(height: 28),
 
-          // ── Datos (mismos campos y orden que "Mi perfil" en la web) ──
+          // ── Datos (mismos campos y orden que "Mi perfil" en la web —
+          // departamento/ciudad/comuna/dirección ya no se muestran acá) ──
           _InfoCard(items: [
             _IR(Icons.phone_outlined,          'Teléfono',      u.telefono ?? '—'),
-            _IR(Icons.location_on_outlined,    'Dirección',     u.direccion ?? '—'),
-            _IR(Icons.map_outlined,            'Comuna',        u.comuna ?? '—'),
-            _IR(Icons.explore_outlined,        'Ubicación',
-              (u.municipio != null && u.departamento != null) ? '${u.municipio}, ${u.departamento}' : '—'),
             _IR(Icons.badge_outlined,          'Documento',
               (u.tipoDoc != null && u.numeroDoc != null) ? '${u.tipoDoc}: ${u.numeroDoc}' : '—'),
             _IR(Icons.calendar_today_outlined, 'Miembro desde', fmtFechaEs(u.fechaRegistro)),
@@ -66,6 +83,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _MenuCard(items: [
             _MI(Icons.receipt_long_outlined, 'Mis pedidos',       () => context.go('/pedidos')),
             _MI(Icons.edit_outlined,          'Editar perfil',    () => context.push('/perfil/editar')),
+            _MI(Icons.chat_outlined,          'Contáctanos',      () => _contactarWhatsapp(context)),
           ]),
           const SizedBox(height: 16),
 
@@ -185,8 +203,8 @@ class EditProfileScreen extends StatefulWidget {
 class _EditState extends State<EditProfileScreen> {
   final _nombre    = TextEditingController();
   final _telefono  = TextEditingController();
-  final _dir       = TextEditingController();
-  String? _comuna, _error;
+  final _correo    = TextEditingController();
+  String? _error;
   bool _loading = false;
 
   @override void initState() {
@@ -194,17 +212,29 @@ class _EditState extends State<EditProfileScreen> {
     final u = AppState.instance.usuario!;
     _nombre.text   = u.nombre;
     _telefono.text = u.telefono ?? '';
-    _dir.text      = u.direccion ?? '';
-    _comuna        = u.comuna;
+    _correo.text   = u.correo;
   }
 
-  @override void dispose() { _nombre.dispose(); _telefono.dispose(); _dir.dispose(); super.dispose(); }
+  @override void dispose() { _nombre.dispose(); _telefono.dispose(); _correo.dispose(); super.dispose(); }
 
   Future<void> _save() async {
+    // validarCorreo solo exige un "@" (el registro con formulario ya no
+    // existe; esta regla mínima quedó únicamente para editar el perfil).
+    final correoError = validarCorreo(_correo.text.trim());
+    if (correoError != null) {
+      setState(() => _error = correoError);
+      return;
+    }
     setState(() { _loading = true; _error = null; });
+    // Dirección/comuna ya no se editan acá — ese endpoint ni siquiera las
+    // guarda (ver comentario en AppState.updateProfile). El correo SÍ se
+    // reenvía siempre: si el backend lo rechaza por estar duplicado, deja
+    // ese mensaje EXACTO en `err` (ver actualizarMiPerfil en el backend).
     final err = await AppState.instance.updateProfile({
-      'nombre': _nombre.text.trim(), 'telefono': _telefono.text.trim(),
-      'direccion': _dir.text.trim(), 'comuna': _comuna ?? ''});
+      'nombre': _nombre.text.trim(),
+      'telefono': _telefono.text.trim(),
+      'correo': _correo.text.trim(),
+    });
     if (!mounted) return;
     if (err != null) {
       setState(() { _loading = false; _error = err; });
@@ -238,16 +268,9 @@ class _EditState extends State<EditProfileScreen> {
             Expanded(child: Text(_error!, style: const TextStyle(color: C.red, fontSize: 13))),
           ])),
       _tf('Nombre completo', _nombre, Icons.person_outline),
+      _tf('Correo electrónico', _correo, Icons.email_outlined, type: TextInputType.emailAddress),
       _tf('Teléfono', _telefono, Icons.phone_outlined, type: TextInputType.phone),
-      _tf('Dirección', _dir, Icons.home_outlined),
-      Text('Comuna', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)),
-      const SizedBox(height: 8),
-      DropdownButtonFormField<String>(
-        value: _comuna, dropdownColor: C.surf2, style: TextStyle(color: C.text, fontSize: 14),
-        decoration: const InputDecoration(hintText: 'Seleccionar...'),
-        items: comunasDisponibles.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
-        onChanged: (v) => setState(() => _comuna = v)),
-      const SizedBox(height: 28),
+      const SizedBox(height: 14),
       ElevatedButton(onPressed: _loading ? null : _save,
         child: _loading ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
             : const Text('Guardar cambios')),

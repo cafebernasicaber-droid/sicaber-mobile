@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/theme.dart';
 import '../../../data/services/app_state.dart';
+import '../../../data/services/data_service.dart';
+import '../../widgets/common/password_checklist.dart';
 
 class RecuperarPasswordScreen extends StatefulWidget {
   RecuperarPasswordScreen({super.key});
@@ -29,8 +31,9 @@ class _RecuperarState extends State<RecuperarPasswordScreen> {
   }
 
   Future<void> _resetear() async {
+    final passError = validarPassword(_nueva.text);
+    if (passError != null) { setState(() => _error = passError); return; }
     if (_nueva.text != _confirma.text) { setState(() => _error = 'Las contraseñas no coinciden'); return; }
-    if (_nueva.text.length < 6) { setState(() => _error = 'Mínimo 6 caracteres'); return; }
     setState(() { _loading = true; _error = null; });
     final err = await AppState.instance.resetPassword(_correo.text.trim(), _token.text.trim(), _nueva.text);
     if (!mounted) return;
@@ -118,8 +121,9 @@ class _RecuperarState extends State<RecuperarPasswordScreen> {
             SizedBox(height: 16),
             Text('Nueva contraseña', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)),
             SizedBox(height: 8),
-            _field(_nueva, 'Mínimo 6 caracteres', Icons.lock_outline, obs: _obsN, toggle: () => setState(() => _obsN = !_obsN)),
-            SizedBox(height: 14),
+            _field(_nueva, '10-20 caracteres, con mayúscula, número y símbolo', Icons.lock_outline, obs: _obsN, toggle: () => setState(() => _obsN = !_obsN)),
+            PasswordChecklist(controller: _nueva),
+            SizedBox(height: 6),
             Text('Confirmar contraseña', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.textSec)),
             SizedBox(height: 8),
             _field(_confirma, 'Repite la contraseña', Icons.lock_outline, obs: _obsC, toggle: () => setState(() => _obsC = !_obsC)),
